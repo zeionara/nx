@@ -83,12 +83,14 @@ defmodule Nx.Defn.Compiler do
 
   defp runtime(fun, args, opts) do
     {compiler, opts} = Keyword.pop(opts, :compiler, Nx.Defn.Evaluator)
-    tensors = Nx.Defn.Tree.from_runtime_args(args)
-    runtime_fun = &runtime_fun(&1, fun, args, compiler)
+    tensors = Nx.Defn.Tree.from_runtime_args(args, opts)
+    # IO.puts "TENSORS"
+    # IO.inspect tensors
+    runtime_fun = &runtime_fun(&1, fun, args, compiler, opts)
     {compiler, [tensors, runtime_fun, opts]}
   end
 
-  defp runtime_fun(tensors, fun, args, compiler) do
+  defp runtime_fun(tensors, fun, args, compiler, opts) do
     if Process.get(Nx.Defn.Compiler) do
       raise "cannot trigger JIT compilation when there is already a JIT compilation happening"
     end
@@ -96,7 +98,7 @@ defmodule Nx.Defn.Compiler do
     Process.put(Nx.Defn.Compiler, compiler)
 
     try do
-      args = Nx.Defn.Tree.args_to_params(args, tensors)
+      args = Nx.Defn.Tree.args_to_params(args, tensors, opts)
 
       fun
       |> apply(args)

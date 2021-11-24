@@ -246,36 +246,52 @@ defmodule Nx.Defn.Tree do
 
   """
   def flatten_list(args, tail \\ []) when is_list(args) do
-    flatten_list(args, tail, &Nx.tensor/1)
+    flatten_list(args, tail, &Nx.tensor/1, [])
   end
 
-  defp flatten_list(args, tail, fun) do
+  defp flatten_list(args, tail, fun, opts) do
     args
-    |> Enum.reduce([], &flatten_each(&1, &2, fun))
+    |> Enum.reduce([], &flatten_each(&1, &2, fun, opts))
     |> Enum.reverse(tail)
   end
 
-  defp flatten_each(%T{} = tensor, acc, _fun),
+  defp flatten_each(%T{} = tensor, acc, _fun, _),
     do: [tensor | acc]
 
-  defp flatten_each(tuple, acc, fun) when is_tuple(tuple),
-    do: tuple |> Tuple.to_list() |> Enum.reduce(acc, &flatten_each(&1, &2, fun))
+  defp flatten_each(tuple, acc, fun, opts) when is_tuple(tuple),
+    do: tuple |> Tuple.to_list() |> Enum.reduce(acc, &flatten_each(&1, &2, fun, opts))
 
-  defp flatten_each(map, acc, fun) when is_struct(map),
+  defp flatten_each(map, acc, fun, opts) when is_struct(map),
     do:
       map
       |> Map.from_struct()
       |> Enum.sort()
-      |> Enum.reduce(acc, &flatten_each(elem(&1, 1), &2, fun))
+      |> Enum.reduce(acc, &flatten_each(elem(&1, 1), &2, fun, opts))
 
-  defp flatten_each(map, acc, fun) when is_map(map),
-    do:
+  # defp flatten_each(map, acc, fun) when is_map(map) do
+  #     map
+  #     |> Enum.sort()
+  #     |> Enum.reduce(acc, &flatten_each(elem(&1, 1), &2, fun))
+  # end
+
+  defp flatten_each(map, acc, fun, opts) when is_map(map) do
+      excluding = Keyword.get(opts, :excluding, [])
       map
       |> Enum.sort()
-      |> Enum.reduce(acc, &flatten_each(elem(&1, 1), &2, fun))
+      |> Enum.filter(
+        fn {key, _} -> 
+          # IO.puts "key = #{key}"
+          not Enum.member?(excluding, key)
+        end
+      )
+      |> Enum.reduce(acc, &flatten_each(elem(&1, 1), &2, fun, opts))
+  end
 
-  defp flatten_each(other, acc, fun),
-    do: [fun.(other) | acc]
+  defp flatten_each(other, acc, fun, _) do
+    # IO.puts "Flattening"
+    # IO.inspect other
+    [fun.(other) | acc]
+  end
 
   ## Nx.Defn callbacks
 
@@ -303,8 +319,8 @@ defmodule Nx.Defn.Tree do
   defp from_compile_args([], cache, vars), do: {cache, Enum.reverse(vars)}
 
   @doc false
-  def from_runtime_args(args) do
-    flatten_list(args, [], &from_arg/1)
+  def from_runtime_args(args, opts \\ []) do
+    flatten_list(args, [], &from_arg/1, opts)
   end
 
   @valid "defn arguments must be numbers, tensors, and functions. " <>
@@ -326,21 +342,30 @@ defmodule Nx.Defn.Tree do
   end
 
   @doc false
-  def args_to_params(args, params) do
+  def args_to_params(args, params, opts \\ []) do
+    # IO.puts "ARGS"
+    # IO.inspect args, structs: false
     {args, {[], _}} =
-      args_to(args, {params, 0}, fn _arg, {[param | params], i} ->
-        {Expr.parameter(param, :root, i), {params, i + 1}}
-      end)
-
+      args_to(args, {params, 0}, fn _arg, {params_list, i} ->
+        # IO.puts "PARAMS LIST"
+        # IO.inspect params_list
+        case params_list do
+          [] ->
+            # IO.puts "ARGS"
+            # IO.inspect args, structs: false
+            {}
+          [param | params] -> {Expr.parameter(param, :root, i), {params, i + 1}}
+        end
+      end, opts)
     args
   end
 
   @doc false
-  def args_to_templates(args, params) do
+  def args_to_templates(args, params, opts \\ []) do
     {args, []} =
       args_to(args, params, fn _arg, [param | params] ->
         {Nx.to_template(param), params}
-      end)
+      end, opts)
 
     args
   end
@@ -367,7 +392,9 @@ defmodule Nx.Defn.Tree do
           "defn must return a tensor expression or a tuple, got: #{inspect(other)}"
   end
 
-  defp args_to(args, acc, fun) when is_list(args) do
+  defp args_to(args, acc, fun, opts) when is_list(args) do
+    # IO.puts "ARGS TO"
+    # IO.inspect args
     Enum.map_reduce(args, acc, fn
       arg, acc
       when is_function(arg)
@@ -375,49 +402,60 @@ defmodule Nx.Defn.Tree do
         {arg, acc}
 
       arg, acc ->
-        args_to_each(arg, acc, fun)
+        args_to_each(arg, acc, fun, opts)
     end)
   end
 
-  defp args_to_each(%T{} = arg, acc, fun) do
+  defp args_to_each(%T{} = arg, acc, fun, _) do
     fun.(arg, acc)
   end
 
-  defp args_to_each(tuple, acc, fun) when is_tuple(tuple) do
+  defp args_to_each(tuple, acc, fun, opts) when is_tuple(tuple) do
     {list, acc} =
       tuple
       |> Tuple.to_list()
-      |> Enum.map_reduce(acc, &args_to_each(&1, &2, fun))
+      |> Enum.map_reduce(acc, &args_to_each(&1, &2, fun, opts))
 
     {List.to_tuple(list), acc}
   end
 
-  defp args_to_each(map, acc, fun) when is_struct(map) do
+  defp args_to_each(map, acc, fun, opts) when is_struct(map) do
     {list, acc} =
       map
       |> Map.from_struct()
       |> Enum.sort()
       |> Enum.map_reduce(acc, fn {k, v}, acc ->
-        {v, acc} = args_to_each(v, acc, fun)
+        {v, acc} = args_to_each(v, acc, fun, opts)
         {{k, v}, acc}
       end)
 
     {struct(map.__struct__, list), acc}
   end
 
-  defp args_to_each(map, acc, fun) when is_map(map) do
+  defp args_to_each(map, acc, fun, opts) when is_map(map) do
+    excluding = Keyword.get(opts, :excluding, [])
     {list, acc} =
       map
       |> Enum.sort()
+      |> Enum.filter(fn {key, _} ->
+        not Enum.member?(excluding, key)
+      end)
       |> Enum.map_reduce(acc, fn {k, v}, acc ->
-        {v, acc} = args_to_each(v, acc, fun)
+        {v, acc} = args_to_each(v, acc, fun, opts)
+        # IO.puts "INSIDE REDUCE GOT V and ACC"
+        # IO.inspect %{v: v, acc: acc}
         {{k, v}, acc}
       end)
 
     {Map.new(list), acc}
   end
 
-  defp args_to_each(arg, acc, fun) do
-    fun.(arg, acc)
+  defp args_to_each(arg, acc, fun, _) do
+    # IO.puts "BAD ARG"
+    # IO.inspect arg
+    # IO.inspect "HAS ACC"
+    # IO.inspect acc
+    # IO.puts "CONVERTED TO"
+    fun.(arg, acc) # |> IO.inspect
   end
 end
