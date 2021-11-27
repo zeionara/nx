@@ -1,9 +1,16 @@
-defmodule EXLA.DefnExprTest do
+defmodule EXLA.Defn.ExprTest do
   use ExUnit.Case, async: true
 
   import Nx.Defn
 
-  @default_defn_compiler EXLA
+  setup do
+    Nx.Defn.default_options(compiler: EXLA)
+    :ok
+  end
+
+  defp evaluate(fun, args) do
+    Nx.Defn.jit(fun, args, compiler: Nx.Defn.Evaluator)
+  end
 
   describe "tuples" do
     defn add_subtract_tuple(a, b), do: {a + b, a - b}
@@ -34,89 +41,17 @@ defmodule EXLA.DefnExprTest do
     end
   end
 
-  describe "structs" do
-    defmodule MyStruct do
-      import Nx.Defn
-
-      @default_defn_compiler EXLA
-
-      defstruct [:foo, :bar]
-
-      defn foo_bar_as_input(%__MODULE__{foo: foo, bar: bar}) do
-        foo * bar
-      end
-
-      defn create_foo_bar(x, y) do
-        %__MODULE__{foo: x, bar: y}
-      end
-
-      defn update_foo_bar_struct(var, x) do
-        %__MODULE__{var | bar: x}
-      end
-
-      defn update_foo_bar_map(var, x) do
-        %{var | bar: x}
-      end
-
-      defn dot_foo_bar(var) do
-        var.foo * var.bar
-      end
-
-      defn foo_bar_with_map_tuple(%__MODULE__{foo: {x, y}, bar: %{} = bar}) do
-        %{a: a, b: b} = bar
-        x * y * a * b
-      end
-    end
-
-    test "can be used and matched as input" do
-      inp = %MyStruct{foo: Nx.tensor(5), bar: Nx.tensor(3)}
-
-      assert MyStruct.foo_bar_as_input(inp) == Nx.tensor(15)
-    end
-
-    test "can be returned from defn" do
-      assert %MyStruct{foo: foo, bar: bar} =
-               MyStruct.create_foo_bar(Nx.tensor([1]), Nx.tensor([2]))
-
-      assert foo == Nx.tensor([1])
-      assert bar == Nx.tensor([2])
-    end
-
-    test "can be updated from struct" do
-      inp = %MyStruct{foo: Nx.tensor(1), bar: 2}
-
-      assert %MyStruct{foo: foo, bar: bar} = MyStruct.update_foo_bar_struct(inp, Nx.tensor(8))
-      assert foo == Nx.tensor(1)
-      assert bar == Nx.tensor(8)
-    end
-
-    test "can be updated from map" do
-      inp = %MyStruct{foo: Nx.tensor(1), bar: 2}
-
-      assert %MyStruct{foo: foo, bar: bar} = MyStruct.update_foo_bar_map(inp, Nx.tensor(8))
-      assert foo == Nx.tensor(1)
-      assert bar == Nx.tensor(8)
-    end
-
-    test "can be used with dot syntax" do
-      inp = %MyStruct{foo: Nx.tensor(1), bar: 2}
-
-      assert MyStruct.dot_foo_bar(inp) == Nx.tensor(2)
-    end
-
-    test "can be used with nested collections" do
-      inp = %MyStruct{foo: {Nx.tensor(1), Nx.tensor(2)}, bar: %{a: Nx.tensor(3), b: Nx.tensor(4)}}
-
-      assert MyStruct.foo_bar_with_map_tuple(inp) == Nx.tensor(24)
-    end
-  end
-
   describe "tensor constants" do
     @two 2
+    defn constants, do: @two
     defn add_two_attribute(t), do: t + @two
 
     @two_per_two Nx.tensor([[1, 2], [3, 4]])
     defn add_2x2_attribute(t), do: t + @two_per_two
+
+    test "handles tensors as constants" do
+      assert constants() == Nx.tensor(2)
+    end
 
     test "expands module attributes to scalars" do
       assert add_two_attribute(1) == Nx.tensor(3)
@@ -139,8 +74,6 @@ defmodule EXLA.DefnExprTest do
 
   describe "+/2" do
     defn add_two(a, b), do: a + b
-    @defn_compiler Nx.Defn.Evaluator
-    defn add_two_nx(a, b), do: a + b
 
     test "same shape and type" do
       assert add_two(1.0, 2.0) == Nx.tensor(3.0)
@@ -173,8 +106,8 @@ defmodule EXLA.DefnExprTest do
       ]
 
       for {left, right} <- tensors do
-        compare_tensors!(add_two(left, right), add_two_nx(left, right))
-        compare_tensors!(add_two(right, left), add_two_nx(right, left))
+        compare_tensors!(add_two(left, right), evaluate(&add_two/2, [left, right]))
+        compare_tensors!(add_two(right, left), evaluate(&add_two/2, [right, left]))
       end
     end
 
@@ -216,8 +149,8 @@ defmodule EXLA.DefnExprTest do
       ]
 
       for {left, right} <- tensors do
-        compare_tensors!(add_two(left, right), add_two_nx(left, right))
-        compare_tensors!(add_two(right, left), add_two_nx(right, left))
+        compare_tensors!(add_two(left, right), evaluate(&add_two/2, [left, right]))
+        compare_tensors!(add_two(right, left), evaluate(&add_two/2, [right, left]))
       end
     end
 
@@ -711,15 +644,20 @@ defmodule EXLA.DefnExprTest do
     for fun <-
           [:exp, :expm1, :log, :log1p, :logistic, :cos, :sin, :tanh, :sqrt, :rsqrt, :cbrt] ++
             [:tan, :acosh, :asinh, :cosh, :sinh, :erf, :erfc] do
-      exla_fun = :"unary_#{fun}"
-      nx_fun = :"unary_#{fun}_nx"
-      defn unquote(exla_fun)(t), do: Nx.unquote(fun)(t)
-      @defn_compiler Nx.Defn.Evaluator
-      defn unquote(nx_fun)(t), do: Nx.unquote(fun)(t)
+      defn_fun = :"unary_#{fun}"
+      defn_var = Macro.var(defn_fun, __MODULE__)
+      defn unquote(defn_fun)(t), do: Nx.unquote(fun)(t)
 
       test "#{fun}" do
-        compare_tensors!(unquote(exla_fun)(@float_tensor), unquote(nx_fun)(@float_tensor))
-        compare_tensors!(unquote(exla_fun)(@int_tensor), unquote(nx_fun)(@int_tensor))
+        compare_tensors!(
+          unquote(defn_fun)(@float_tensor),
+          evaluate(&(unquote(defn_var) / 1), [@float_tensor])
+        )
+
+        compare_tensors!(
+          unquote(defn_fun)(@int_tensor),
+          evaluate(&(unquote(defn_var) / 1), [@int_tensor])
+        )
       end
     end
   end
@@ -729,15 +667,20 @@ defmodule EXLA.DefnExprTest do
     @float_tensor Nx.tensor([0.1, 0.5, 0.9])
 
     for fun <- [:atanh, :acos, :asin, :atan, :erf_inv] do
-      exla_fun = :"unary_#{fun}"
-      nx_fun = :"unary_#{fun}_nx"
-      defn unquote(exla_fun)(t), do: Nx.unquote(fun)(t)
-      @defn_compiler Nx.Defn.Evaluator
-      defn unquote(nx_fun)(t), do: Nx.unquote(fun)(t)
+      defn_fun = :"unary_#{fun}"
+      defn_var = Macro.var(defn_fun, __MODULE__)
+      defn unquote(defn_fun)(t), do: Nx.unquote(fun)(t)
 
       test "#{fun}" do
-        compare_tensors!(unquote(exla_fun)(@float_tensor), unquote(nx_fun)(@float_tensor))
-        compare_tensors!(unquote(exla_fun)(@int_tensor), unquote(nx_fun)(@int_tensor))
+        compare_tensors!(
+          unquote(defn_fun)(@float_tensor),
+          evaluate(&(unquote(defn_var) / 1), [@float_tensor])
+        )
+
+        compare_tensors!(
+          unquote(defn_fun)(@int_tensor),
+          evaluate(&(unquote(defn_var) / 1), [@int_tensor])
+        )
       end
     end
   end
@@ -750,16 +693,25 @@ defmodule EXLA.DefnExprTest do
     funs = [:abs, :sign, :floor, :ceil, :round]
 
     for fun <- funs do
-      exla_fun = :"unary_#{fun}"
-      nx_fun = :"unary_#{fun}_nx"
-      defn unquote(exla_fun)(t), do: Nx.unquote(fun)(t)
-      @defn_compiler Nx.Defn.Evaluator
-      defn unquote(nx_fun)(t), do: Nx.unquote(fun)(t)
+      defn_fun = :"unary_#{fun}"
+      defn_var = Macro.var(defn_fun, __MODULE__)
+      defn unquote(defn_fun)(t), do: Nx.unquote(fun)(t)
 
       test "#{fun}" do
-        compare_tensors!(unquote(exla_fun)(@uint_tensor), unquote(nx_fun)(@uint_tensor))
-        compare_tensors!(unquote(exla_fun)(@sint_tensor), unquote(nx_fun)(@sint_tensor))
-        compare_tensors!(unquote(exla_fun)(@float_tensor), unquote(nx_fun)(@float_tensor))
+        compare_tensors!(
+          unquote(defn_fun)(@uint_tensor),
+          evaluate(&(unquote(defn_var) / 1), [@uint_tensor])
+        )
+
+        compare_tensors!(
+          unquote(defn_fun)(@sint_tensor),
+          evaluate(&(unquote(defn_var) / 1), [@sint_tensor])
+        )
+
+        compare_tensors!(
+          unquote(defn_fun)(@float_tensor),
+          evaluate(&(unquote(defn_var) / 1), [@float_tensor])
+        )
       end
     end
   end
@@ -1052,29 +1004,29 @@ defmodule EXLA.DefnExprTest do
   end
 
   describe "reduce window" do
-    defn reduce_window_valid_no_stride(t),
-      do: Nx.reduce_window(t, 0, {2, 2}, fn a, b -> a + b end)
+    defn window_reduce_valid_no_stride(t),
+      do: Nx.window_reduce(t, 0, {2, 2}, fn a, b -> a + b end)
 
-    defn reduce_window_valid_stride(t),
-      do: Nx.reduce_window(t, 0, {2, 2}, [strides: [2, 2]], fn a, b -> a + b end)
+    defn window_reduce_valid_stride(t),
+      do: Nx.window_reduce(t, 0, {2, 2}, [strides: [2, 2]], fn a, b -> a + b end)
 
-    defn reduce_window_same_no_stride(t),
-      do: Nx.reduce_window(t, 0, {2, 2}, [padding: :same], fn a, b -> a + b end)
+    defn window_reduce_same_no_stride(t),
+      do: Nx.window_reduce(t, 0, {2, 2}, [padding: :same], fn a, b -> a + b end)
 
-    defn reduce_window_same_stride(t),
-      do: Nx.reduce_window(t, 0, {2, 2}, [padding: :same, strides: [2, 1]], fn a, b -> a + b end)
+    defn window_reduce_same_stride(t),
+      do: Nx.window_reduce(t, 0, {2, 2}, [padding: :same, strides: [2, 1]], fn a, b -> a + b end)
 
-    defn reduce_window_general_no_stride(t),
-      do: Nx.reduce_window(t, 0, {2, 2}, [padding: [{2, 1}, {1, 2}]], fn a, b -> a + b end)
+    defn window_reduce_general_no_stride(t),
+      do: Nx.window_reduce(t, 0, {2, 2}, [padding: [{2, 1}, {1, 2}]], fn a, b -> a + b end)
 
-    defn reduce_window_general_stride(t) do
-      Nx.reduce_window(t, 0, {2, 2}, [padding: [{1, 2}, {2, 1}], strides: [2, 1]], fn a, b ->
+    defn window_reduce_general_stride(t) do
+      Nx.window_reduce(t, 0, {2, 2}, [padding: [{1, 2}, {2, 1}], strides: [2, 1]], fn a, b ->
         a + b
       end)
     end
 
-    defn reduce_window_nd(t) do
-      Nx.reduce_window(
+    defn window_reduce_nd(t) do
+      Nx.window_reduce(
         t,
         0,
         {1, 2, 1, 2, 1, 2},
@@ -1083,8 +1035,8 @@ defmodule EXLA.DefnExprTest do
       )
     end
 
-    defn dilated_reduce_window(t) do
-      Nx.reduce_window(
+    defn dilated_window_reduce(t) do
+      Nx.window_reduce(
         t,
         0,
         {2, 1, 2},
@@ -1096,29 +1048,29 @@ defmodule EXLA.DefnExprTest do
     test "valid padding, no stride" do
       t = Nx.iota({6, 7})
 
-      assert reduce_window_valid_no_stride(t) ==
-               Nx.reduce_window(t, 0, {2, 2}, fn a, b -> a + b end)
+      assert window_reduce_valid_no_stride(t) ==
+               Nx.window_reduce(t, 0, {2, 2}, fn a, b -> a + b end)
     end
 
     test "valid padding, stride" do
       t = Nx.iota({11, 10})
 
-      assert reduce_window_valid_stride(t) ==
-               Nx.reduce_window(t, 0, {2, 2}, [strides: [2, 2]], fn a, b -> a + b end)
+      assert window_reduce_valid_stride(t) ==
+               Nx.window_reduce(t, 0, {2, 2}, [strides: [2, 2]], fn a, b -> a + b end)
     end
 
     test "same padding, no stride" do
       t = Nx.iota({3, 3})
 
-      assert reduce_window_same_no_stride(t) ==
-               Nx.reduce_window(t, 0, {2, 2}, [padding: :same], fn a, b -> a + b end)
+      assert window_reduce_same_no_stride(t) ==
+               Nx.window_reduce(t, 0, {2, 2}, [padding: :same], fn a, b -> a + b end)
     end
 
     test "same padding, stride" do
       t = Nx.iota({8, 8})
 
-      assert reduce_window_same_stride(t) ==
-               Nx.reduce_window(t, 0, {2, 2}, [padding: :same, strides: [2, 1]], fn a, b ->
+      assert window_reduce_same_stride(t) ==
+               Nx.window_reduce(t, 0, {2, 2}, [padding: :same, strides: [2, 1]], fn a, b ->
                  a + b
                end)
     end
@@ -1126,15 +1078,15 @@ defmodule EXLA.DefnExprTest do
     test "general padding, no stride" do
       t = Nx.iota({3, 3})
 
-      assert reduce_window_general_no_stride(t) ==
-               Nx.reduce_window(t, 0, {2, 2}, [padding: [{2, 1}, {1, 2}]], fn a, b -> a + b end)
+      assert window_reduce_general_no_stride(t) ==
+               Nx.window_reduce(t, 0, {2, 2}, [padding: [{2, 1}, {1, 2}]], fn a, b -> a + b end)
     end
 
     test "general padding, stride" do
       t = Nx.iota({7, 7})
 
-      assert reduce_window_general_stride(t) ==
-               Nx.reduce_window(
+      assert window_reduce_general_stride(t) ==
+               Nx.window_reduce(
                  t,
                  0,
                  {2, 2},
@@ -1146,8 +1098,8 @@ defmodule EXLA.DefnExprTest do
     test "n-d reduce window" do
       t = Nx.iota({4, 2, 4, 3, 1, 3})
 
-      assert reduce_window_nd(t) ==
-               Nx.reduce_window(
+      assert window_reduce_nd(t) ==
+               Nx.window_reduce(
                  t,
                  0,
                  {1, 2, 1, 2, 1, 2},
@@ -1156,12 +1108,12 @@ defmodule EXLA.DefnExprTest do
                )
     end
 
-    @tag :unsupported_dilated_reduce_window
+    @tag :unsupported_dilated_window_reduce
     test "computes a dilated reduce window" do
       t = Nx.iota({6, 4, 3})
 
-      assert dilated_reduce_window(t) ==
-               Nx.reduce_window(
+      assert dilated_window_reduce(t) ==
+               Nx.window_reduce(
                  t,
                  0,
                  {2, 1, 2},
@@ -1171,19 +1123,20 @@ defmodule EXLA.DefnExprTest do
     end
   end
 
-  describe "scatter_window_min/max" do
-    defn scatter_window_max_no_padding(t) do
-      Nx.scatter_window_max(
+  describe "window_scatter_min/max" do
+    defn window_scatter_max_no_padding(t) do
+      Nx.window_scatter_max(
         t,
         Nx.tensor([[2, 6], [3, 1]]),
+        0,
         {2, 3},
-        [padding: :valid, strides: [2, 3]],
-        0
+        padding: :valid,
+        strides: [2, 3]
       )
     end
 
     @tag :unsupported_64_bit_op
-    test "scatter_window_max produces the same result as Nx with no padding" do
+    test "window_scatter_max produces the same result as Nx with no padding" do
       x =
         Nx.tensor([
           [7, 2, 5, 3, 10, 2],
@@ -1192,32 +1145,34 @@ defmodule EXLA.DefnExprTest do
           [0, 6, 2, 7, 2, 8]
         ])
 
-      lhs = scatter_window_max_no_padding(x)
+      lhs = window_scatter_max_no_padding(x)
 
       rhs =
-        Nx.scatter_window_max(
+        Nx.window_scatter_max(
           x,
           Nx.tensor([[2, 6], [3, 1]]),
+          0,
           {2, 3},
-          [padding: :valid, strides: [2, 3]],
-          0
+          padding: :valid,
+          strides: [2, 3]
         )
 
       compare_tensors!(lhs, rhs)
     end
 
-    defn scatter_window_min_no_padding(t) do
-      Nx.scatter_window_min(
+    defn window_scatter_min_no_padding(t) do
+      Nx.window_scatter_min(
         t,
         Nx.tensor([[2, 6], [3, 1]]),
+        0,
         {2, 3},
-        [padding: :valid, strides: [2, 3]],
-        0
+        padding: :valid,
+        strides: [2, 3]
       )
     end
 
     @tag :unsupported_64_bit_op
-    test "scatter_window_min produces the same result as Nx with no padding" do
+    test "window_scatter_min produces the same result as Nx with no padding" do
       x =
         Nx.tensor([
           [7, 2, 5, 3, 10, 2],
@@ -1226,27 +1181,28 @@ defmodule EXLA.DefnExprTest do
           [0, 6, 2, 7, 2, 8]
         ])
 
-      lhs = scatter_window_min_no_padding(x)
+      lhs = window_scatter_min_no_padding(x)
 
       rhs =
-        Nx.scatter_window_min(
+        Nx.window_scatter_min(
           x,
           Nx.tensor([[2, 6], [3, 1]]),
+          0,
           {2, 3},
-          [padding: :valid, strides: [2, 3]],
-          0
+          padding: :valid,
+          strides: [2, 3]
         )
 
       compare_tensors!(lhs, rhs)
     end
   end
 
-  describe "scatter_add" do
-    defn scatter_add(t, i, u) do
-      Nx.scatter_add(t, i, u)
+  describe "indexed_add" do
+    defn indexed_add(t, i, u) do
+      Nx.indexed_add(t, i, u)
     end
 
-    test "scatter_add works for multi-dim tensor" do
+    test "indexed_add works for multi-dim tensor" do
       target = Nx.broadcast(0, {2, 3, 4})
 
       indices =
@@ -1282,33 +1238,33 @@ defmodule EXLA.DefnExprTest do
                  [0, 0, 0, 0],
                  [0, 0, -1, 3]
                ]
-             ]) == scatter_add(target, indices, updates)
+             ]) == indexed_add(target, indices, updates)
     end
 
-    test "scatter_add handles different input types" do
+    test "indexed_add handles different input types" do
       target = Nx.tensor([0])
       indices = Nx.tensor([[0]])
       updates = Nx.tensor([1])
 
-      assert Nx.tensor([1], type: {:s, 64}) == scatter_add(target, indices, updates)
+      assert Nx.tensor([1], type: {:s, 64}) == indexed_add(target, indices, updates)
 
       target = Nx.tensor([0])
       indices = Nx.tensor([[0]])
       updates = Nx.tensor([1.0])
 
-      assert Nx.tensor([1.0], type: {:f, 32}) == scatter_add(target, indices, updates)
+      assert Nx.tensor([1.0], type: {:f, 32}) == indexed_add(target, indices, updates)
 
       target = Nx.tensor([0.0])
       indices = Nx.tensor([[0]])
       updates = Nx.tensor([1])
 
-      assert Nx.tensor([1.0], type: {:f, 32}) == scatter_add(target, indices, updates)
+      assert Nx.tensor([1.0], type: {:f, 32}) == indexed_add(target, indices, updates)
 
       target = Nx.tensor([0.0], type: {:f, 64})
       indices = Nx.tensor([[0]])
       updates = Nx.tensor([1.0], type: {:f, 32})
 
-      assert Nx.tensor([1.0], type: {:f, 64}) == scatter_add(target, indices, updates)
+      assert Nx.tensor([1.0], type: {:f, 64}) == indexed_add(target, indices, updates)
     end
   end
 
@@ -1636,7 +1592,7 @@ defmodule EXLA.DefnExprTest do
                ])
     end
 
-    @tag :unsupported_dilated_reduce_window
+    @tag :unsupported_dilated_window_reduce
     test "computes the sum of a dilated window" do
       t = Nx.iota({8, 10, 12})
 
@@ -1678,7 +1634,7 @@ defmodule EXLA.DefnExprTest do
                ])
     end
 
-    @tag :unsupported_dilated_reduce_window
+    @tag :unsupported_dilated_window_reduce
     test "computes the mean of a dilated window" do
       t = Nx.iota({8, 10, 12})
       lhs = dilated_window_mean(t)
@@ -1738,7 +1694,7 @@ defmodule EXLA.DefnExprTest do
                ])
     end
 
-    @tag :unsupported_dilated_reduce_window
+    @tag :unsupported_dilated_window_reduce
     test "computes the max of a dilated window" do
       t = Nx.iota({8, 10, 12}, type: {:f, 64})
 
@@ -1795,7 +1751,7 @@ defmodule EXLA.DefnExprTest do
                ])
     end
 
-    @tag :unsupported_dilated_reduce_window
+    @tag :unsupported_dilated_window_reduce
     test "computes the min of a dilated window" do
       t = Nx.iota({8, 10, 12})
 
@@ -1841,7 +1797,7 @@ defmodule EXLA.DefnExprTest do
                ])
     end
 
-    @tag :unsupported_dilated_reduce_window
+    @tag :unsupported_dilated_window_reduce
     test "computes the product of a dilated window" do
       t = Nx.iota({8, 10, 12})
 
@@ -3203,7 +3159,7 @@ defmodule EXLA.DefnExprTest do
       tensor = Nx.dot(tensor, Nx.transpose(tensor))
       lhs = cholesky(tensor)
       rhs = Nx.LinAlg.cholesky(tensor)
-      compare_tensors!(lhs, rhs, atol: 1.0e-5, rtol: 1.0e-2)
+      compare_tensors!(lhs, rhs, atol: 1.0e-4, rtol: 1.0e-2)
     end
   end
 
@@ -3218,28 +3174,29 @@ defmodule EXLA.DefnExprTest do
   end
 
   describe "precision" do
-    @defn_compiler {EXLA, precision: :bad}
-    defn bad_precision(t1, t2), do: Nx.dot(t1, t2)
-
-    @defn_compiler {EXLA, precision: :high}
-    defn good_precision(t1, t2), do: Nx.dot(t1, t2)
+    defn precision(t1, t2), do: Nx.dot(t1, t2)
 
     test "raises on bad precision" do
       assert_raise ArgumentError,
                    "expected precision configuration to be one of" <>
                      " :default, :high, or :highest, got: :bad",
                    fn ->
-                     bad_precision(
-                       Nx.tensor([1, 2, 3], type: {:bf, 16}),
-                       Nx.tensor([1, 2, 3], type: {:bf, 16})
+                     EXLA.jit(
+                       &precision/2,
+                       [
+                         Nx.tensor([1, 2, 3], type: {:bf, 16}),
+                         Nx.tensor([1, 2, 3], type: {:bf, 16})
+                       ],
+                       precision: :bad
                      )
                    end
     end
 
     test "succeeds on good precision" do
-      assert good_precision(
-               Nx.tensor([1, 2, 3], type: {:bf, 16}),
-               Nx.tensor([1, 2, 3], type: {:bf, 16})
+      assert EXLA.jit(
+               &precision/2,
+               [Nx.tensor([1, 2, 3], type: {:bf, 16}), Nx.tensor([1, 2, 3], type: {:bf, 16})],
+               precision: :high
              ) == Nx.tensor(14, type: {:bf, 16})
     end
   end

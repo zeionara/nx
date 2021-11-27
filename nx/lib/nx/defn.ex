@@ -5,8 +5,12 @@ defmodule Nx.Defn do
   A numerical function is a subset of Elixir tailored for
   numerical computations. For example, the following function:
 
-      defn add_and_mult(a, b, c) do
-        a * b + c
+      defmodule MyModule do
+        import Nx.Defn
+
+        defn softmax(t) do
+          Nx.exp(t) / Nx.sum(Nx.exp(t))
+        end
       end
 
   will work with scalars, vector, matrices, and n-dimensional
@@ -22,10 +26,14 @@ defmodule Nx.Defn do
 
   For example, the code above can also be written as:
 
-      defn add_and_mult(a, b, c) do
-        a
-        |> Nx.multiply(b)
-        |> Nx.add(c)
+      defmodule MyModule do
+        import Nx.Defn
+
+        defn softmax(t) do
+          t
+          |> Nx.exp(t)
+          |> then(& &1 / Nx.sum(&1))
+        end
       end
 
   Please consult `Nx.Defn.Kernel` for a complete reference.
@@ -55,42 +63,30 @@ defmodule Nx.Defn do
   ## JIT compilers
 
   The power of `Nx.Defn` is given by its compilers. The default
-  compiler is the `Nx.Defn` module itself, which executes the code
-  in pure Elixir. However, you can use module attributes to specify
-  how a `defn` function will behave. For example, assuming you
-  are using the `EXLA` compiler:
+  compiler is `Nx.Defn.Evaluator`, which executes the code in
+  pure Elixir. You can use `jit/3` to compile a function on the
+  fly using a different compiler, such as `EXLA`:
 
-      @defn_compiler {EXLA, client: :host}
-      defn add_and_mult(a, b, c) do
-        a * b + c
-      end
+      Nx.Defn.jit(&MyModule.softmax/1, [my_tensor], compiler: EXLA)
 
-  To set the compiler for the all definitions, you can set the
-  `@default_defn_compiler` attribute:
+  The above will optimize, compile, and run `softmax` on the fly
+  to the CPU (or the GPU) if available.
 
-      @default_defn_compiler {EXLA, client: :cuda}
+  You can also change the default compiler for all numerical
+  definitions (`defn`) by setting the default options. This can
+  be done in your `config/*.exs` files as follows:
+
+      config :nx, :default_defn_options, compiler: EXLA
+
+  Now calling `MyModule.softmax(my_tensor)` will use `EXLA` even
+  without wrapping it in `jit/3`. For scripts, you may also call
+  `Nx.Defn.global_default_options(compiler: EXLA)`.
 
   `defn` functions are compiled when they are invoked, based on
-  the type and shapes of the tensors given as arguments. Once
-  invoked for the first time, the compilation is cached based
-  on the tensors shapes and types. Calling the same function with
-  a tensor of different values but same shape and type means no
-  further compilation is performed.
-
-  Also note that the defn compiler only applies to the first
-  call to `defn`. All other calls that happen within that `defn`
-  will use the same compiler. For example, imagine this code:
-
-      @defn_compiler Nx.Defn.Evaluator # the default
-      defn add(a, b), do: do_add(a, b)
-
-      @defn_compiler EXLA
-      defnp do_add(a, b), do: a + b
-
-  When calling `add/2` directly, even though it calls `do_add/2`
-  which uses EXLA, the call to `add/2` will be compiled with
-  `Nx.Defn` and `Nx.Defn` exclusively. In other words, only the
-  entry-point compiler matters.
+  the type and shapes of the tensors given as arguments. The
+  compilation is then cached based on the tensors shapes and types.
+  Calling the same function with a tensor of different values but
+  same shape and type means no recompilation is performed.
 
   For those interested in writing custom compilers, see `Nx.Defn.Compiler`.
 
@@ -127,21 +123,17 @@ defmodule Nx.Defn do
 
   ## Inputs and outputs types
 
-  The arguments to `defn` functions must be either tensors, numbers,
-  or anonymous functions. `defn` also supports two composite data
-  types as arguments:
+  `Nx` and `defn` expect the arguments to be numbers, tensors,
+  or one of the following composite data types:
 
-    1. tuples of number/tensors or tuples of anonymous functions
-    2. maps of any ley with number/tensors as values
+    1. tuples of numbers/tensors
+    2. maps of any key with numbers/tensors as values
+    3. any struct that implements `Nx.Container`
 
   When numbers are given as arguments, they are always immediately
   converted to tensors on invocation. If you want to keep numbers
-  as is or if you want to pass any other values to numerical
-  definitions, they must be given as default arguments (see next
-  subsection).
-
-  `defn` functions can only return tensors, tuples of tensors, or
-  maps of tensors.
+  as is or if you want to pass any other value to numerical definitions,
+  they must be given as default arguments (see next subsection).
 
   ### Default arguments
 
@@ -163,15 +155,21 @@ defmodule Nx.Defn do
   you have to use transforms, as described in the "Invoking custom Elixir
   code" section.
 
-  When it comes to JIT compilation, it is important to notice that each
-  different set of options will lead to a different compilation of the
-  numerical function. Also note that, if tensors are given as default
-  arguments, the whole tensor will be used as the compilation key. So
-  even if you pass different tensors with the same type and shape, it
-  will lead to different compilation artifacts. For this reason, it
-  is **extremely discouraged to pass tensors through default arguments**.
+  Additionally, `defn` supports anonymous as a direct input, without wrapping
+  in a default argument.
 
-  ### Working with maps
+  > **Important!** When it comes to JIT compilation, each different set of
+  > options and anonymous functions will lead to a different compilation of
+  > the numerical function.
+  >
+  > Furthermore, if tensors are given through default arguments, they won't
+  > be cached effectively. Tensors in `defn` are cached based on their shape
+  > and type, not their value, but this is not true if the tensor is given
+  > via a default argument or captured by an anonymous function. For this
+  > reason, it is **extremely discouraged to pass tensors through anonymous
+  > functions and default arguments**.
+
+  ### Working with maps and structs
 
   While `Nx` supports maps in `defn`, you must be careful if your numerical
   definitions are receiving maps and returning maps. For example, imagine
@@ -199,6 +197,60 @@ defmodule Nx.Defn do
   `Nx` will only send the parts of the map that matters.
   """
 
+  @compiler_key {Nx.Defn, :default_compiler}
+  @app_key :default_defn_options
+
+  @doc """
+  Sets the default options for `defn` in the current process.
+
+  The options defined here apply to all future invocations of
+  `defn` done by the current process. It also applies to calls
+  to the `jit/3` and `stream/3` functions in this module.
+
+  The default options are stored only in the process dictionary
+  and override any global options. This means if you start a
+  separate process, such as `Task`, the default options must be
+  set on the new process too.
+
+  This function is mostly used for scripting and testing. In your
+  applications, you typically set the default options in your
+  config files:
+
+        config :nx, :#{@app_key}, [compiler: EXLA, client: :cuda]
+
+  """
+  def default_options(options) when is_list(options) do
+    Process.put(@compiler_key, options) || Application.fetch_env!(:nx, @app_key)
+  end
+
+  @doc """
+  Sets the default options globally.
+
+  The options defined here apply to all future invocations of
+  `defn`. It also applies to calls to the `jit/3` and `stream/3`
+  functions in this module.
+
+  You must avoid calling this function at runtime. It is mostly
+  useful during scripts or code notebooks to set a default.
+  If you need to configure a global default options in your
+  applications, you can do so in your `config/*.exs` files:
+
+      config :nx, :#{@app_key}, [compiler: EXLA, client: :cuda]
+
+  """
+  def global_default_options(options) when is_list(options) do
+    current = Application.fetch_env!(:nx, @app_key)
+    Application.put_env(:nx, @app_key, options)
+    current
+  end
+
+  @doc """
+  Gets the default options for the current process.
+  """
+  def default_options() do
+    Process.get(@compiler_key) || Application.fetch_env!(:nx, @app_key)
+  end
+
   @doc """
   Invokes the anonymous function with just-in-time compilation.
 
@@ -208,16 +260,18 @@ defmodule Nx.Defn do
 
       defn softmax(t), do: Nx.exp(t) / Nx.sum(Nx.exp(t))
 
-  **Note:** `jit/3` will ignore the `@defn_compiler` on the executed
-  function. Be sure to pass the `compiler` and its `opts` as keywords
-  instead:
+  ## Options
 
-      Nx.Defn.jit(&Mod.softmax/1, [my_tensor], compiler: EXLA)
-      Nx.Defn.jit(&Mod.softmax/1, [my_tensor], compiler: EXLA, run_options: [keep_on_device: true])
+    * `:hooks` - a map of hooks to execute. See `Nx.Defn.Kernel.hook/3`
 
   """
   def jit(fun, args, opts \\ [])
       when is_function(fun) and is_list(args) and is_list(opts) do
+    if Nx.Defn.Compiler.current() do
+      raise "cannot call Nx.Defn.jit/3 when there is already a JIT compilation happening"
+    end
+
+    opts = prepare_options(opts)
     Nx.Defn.Compiler.__jit__(fun, args, opts)
   end
 
@@ -291,20 +345,36 @@ defmodule Nx.Defn do
       {:chunk, 4}
       {:result, 5}
 
-  **Note:** similar to `jit/3`, `stream/3` will ignore the `@defn_compiler`
-  on the executed function. Be sure to pass the `compiler` and its `opts`
-  as arguments instead.
+  ## Options
+
+    * `:hooks` - a map of hooks to execute. See `Nx.Defn.Kernel.hook/3`
+
   """
   def stream(fun, args, opts \\ [])
       when is_function(fun) and is_list(args) and is_list(opts) do
+    if Nx.Defn.Compiler.current() do
+      raise "cannot call Nx.Defn.stream/3 when there is already a JIT compilation happening"
+    end
+
     case args do
       [input, acc | args] ->
-        acc = Nx.Defn.Tree.composite(acc, &Nx.to_tensor/1)
+        acc = Nx.Defn.Composite.traverse(acc, &Nx.to_tensor/1)
+        opts = prepare_options(opts)
         Nx.Defn.Compiler.__stream__(fun, Nx.to_template(input), acc, args, opts)
 
       _ ->
         raise ArgumentError, "Nx.Defn.stream/3 expects at least two arguments"
     end
+  end
+
+  defp prepare_options(opts) do
+    opts = Keyword.merge(default_options(), opts)
+
+    if not is_map(Keyword.get(opts, :hooks, %{})) do
+      raise ArgumentError, ":hooks option must be a map"
+    end
+
+    opts
   end
 
   @doc """
@@ -499,12 +569,6 @@ defmodule Nx.Defn do
   # Internal attributes
   @exports_key :__defn_exports__
 
-  # Per-defn attributes
-  @defn_compiler :defn_compiler
-
-  # Module attributes
-  @default_defn_compiler :default_defn_compiler
-
   @doc false
   def __define__(module, kind, name, arity, defaults) do
     exports =
@@ -515,29 +579,9 @@ defmodule Nx.Defn do
         %{}
       end
 
-    compiler =
-      Module.delete_attribute(module, @defn_compiler) ||
-        Module.get_attribute(module, @default_defn_compiler) ||
-        Nx.Defn.Evaluator
-
-    exports =
-      Map.put(exports, {name, arity}, %{
-        kind: kind,
-        compiler: normalize_compiler!(compiler),
-        defaults: defaults
-      })
-
+    exports = Map.put(exports, {name, arity}, %{kind: kind, defaults: defaults})
     Module.put_attribute(module, @exports_key, exports)
     :ok
-  end
-
-  defp normalize_compiler!(atom) when is_atom(atom), do: {atom, []}
-  defp normalize_compiler!({atom, term}) when is_atom(atom), do: {atom, term}
-
-  defp normalize_compiler!(other) do
-    raise ArgumentError,
-          "expected @defn_compiler/@default_defn_compiler to be an atom or " <>
-            "a tuple with an atom as first element, got: #{inspect(other)}"
   end
 
   defp compile_error!(env, description) do

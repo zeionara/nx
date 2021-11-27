@@ -103,6 +103,17 @@ inline std::string type2string(const torch::ScalarType type)
   }                                                                                             \
   CATCH()
 
+#define TENSOR_TUPLE_3(TT)                                                                      \
+  try                                                                                           \
+  {                                                                                             \
+    std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> tt = TT;                            \
+    std::vector<ERL_NIF_TERM> res_list;                                                         \
+    for (torch::Tensor t : {std::get<0>(tt), std::get<1>(tt), std::get<2>(tt)})                 \
+      res_list.push_back(create_tensor_resource(env, t));                                       \
+    return nx::nif::ok(env, enif_make_tuple_from_array(env, res_list.data(), res_list.size())); \
+  }                                                                                             \
+  CATCH()
+
 ERL_NIF_TERM
 create_tensor_resource(ErlNifEnv *env, torch::Tensor tensor)
 {
@@ -163,12 +174,21 @@ NIF(to_blob)
   }
 
   torch::optional<torch::Device> device = torch::device_of(*t);
+  // flatten the tensor to compensate for operations which return
+  // a column-major tensor. t->flatten() is a no-op if the tensor
+  // is already row-major, which was verified by printing t->data_ptr
+  // and reshaped.data_ptr and confirming they had the same value.
+  torch::Tensor reshaped = t->flatten();
+  void * data_ptr = reshaped.data_ptr();
 
-  if(device.has_value() && device.value().type() == torch::kCPU) {
-    return nx::nif::ok(env, enif_make_resource_binary(env, t, t->data_ptr(), byte_size));
-  } else {
+  if (device.has_value() && device.value().type() == torch::kCPU && data_ptr == t->data_ptr())
+  {
+    return nx::nif::ok(env, enif_make_resource_binary(env, t, data_ptr, byte_size));
+  }
+  else
+  {
     void *result_data = (void *)enif_make_new_binary(env, byte_size, &result);
-    memcpy(result_data, t->data_ptr(), byte_size);
+    memcpy(result_data, data_ptr, byte_size);
     return nx::nif::ok(env, result);
   }
 }
@@ -544,6 +564,34 @@ UNARY_OP(erf)
 UNARY_OP(erfc)
 UNARY_OP2(erf_inv, erfinv)
 
+NIF(triangular_solve)
+{
+  TENSOR_PARAM(0, a);
+  TENSOR_PARAM(1, b);
+  PARAM(2, bool, transpose);
+  PARAM(3, bool, upper);
+
+  std::tuple<torch::Tensor, torch::Tensor> result = torch::triangular_solve(*b, *a, upper, transpose);
+
+  TENSOR(std::get<0>(result));
+}
+
+NIF(determinant)
+{
+  TENSOR_PARAM(0, t);
+
+  TENSOR(t->det());
+}
+
+NIF(sort)
+{
+  TENSOR_PARAM(0, t);
+  PARAM(1, int64_t, axis);
+  PARAM(2, bool, descending);
+
+  std::tuple<torch::Tensor, torch::Tensor> result = t->sort(axis, descending);
+  TENSOR(std::get<0>(result));
+}
 
 /* Aggregates */
 
@@ -554,6 +602,21 @@ NIF(sum)
   PARAM(2, bool, keep_dim);
 
   TENSOR(torch::sum(*t, dims, keep_dim));
+}
+
+NIF(product)
+{
+  TENSOR_PARAM(0, t);
+
+  if (argc == 1)
+  {
+    TENSOR(torch::prod(*t));
+  }
+
+  PARAM(1, int64_t, dim);
+  PARAM(2, bool, keep_dim);
+
+  TENSOR(torch::prod(*t, dim, keep_dim));
 }
 
 NIF(argmax)
@@ -622,6 +685,16 @@ NIF(qr)
   }
 
   TENSOR_TUPLE(torch::qr(*t, reduced));
+}
+
+NIF(lu)
+{
+  TENSOR_PARAM(0, t);
+
+  std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> lu_result = torch::_lu_with_info(*t);
+  std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> plu = torch::lu_unpack(std::get<0>(lu_result), std::get<1>(lu_result));
+
+  TENSOR_TUPLE_3(plu);
 }
 
 void free_tensor(ErlNifEnv *env, void *obj)
@@ -736,6 +809,8 @@ static ErlNifFunc nif_functions[] = {
 
     DF(outer, 2),
     DF(sum, 3),
+    DF(product, 1),
+    DF(product, 3),
     DF(argmax, 3),
     DF(argmin, 3),
     DF(all, 3),
@@ -777,6 +852,10 @@ static ErlNifFunc nif_functions[] = {
     DF(cholesky, 2),
     DF(qr, 1),
     DF(qr, 2),
+    DF(lu, 1),
+    DF(triangular_solve, 4),
+    DF(determinant, 1),
+    DF(sort, 3),
 
     F(cuda_is_available, 0),
     F(cuda_device_count, 0),

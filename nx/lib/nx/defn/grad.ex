@@ -1,13 +1,12 @@
 defmodule Nx.Defn.Grad do
   @moduledoc false
 
-  alias Nx.Defn.{Expr, Tree}
+  alias Nx.Defn.{Composite, Expr, Tree}
   alias Nx.Tensor, as: T
 
   def transform(to_grad, fun, transform) do
     {to_grad, ids} =
-      Tree.composite(to_grad, %{}, fn to_grad, ids ->
-        validate_grad!(to_grad)
+      Composite.traverse(to_grad, %{}, fn to_grad, ids ->
         to_grad = Expr.metadata(to_grad, %{__MODULE__ => :to_grad})
         {to_grad, Map.put(ids, to_grad.data.id, :to_grad)}
       end)
@@ -29,7 +28,7 @@ defmodule Nx.Defn.Grad do
     # We do so by encoding special nodes in the Expr
     # AST and unpack them as we verify.
     graded =
-      Tree.composite(to_grad, fn to_grad ->
+      Composite.traverse(to_grad, fn to_grad ->
         id = to_grad.data.id
         {graded, _, _} = zerofy_ids(graded, %{}, Map.delete(ids, id))
 
@@ -41,14 +40,6 @@ defmodule Nx.Defn.Grad do
       end)
 
     {expr, graded}
-  end
-
-  defp validate_grad!(%T{data: %Expr{}} = t), do: t
-
-  defp validate_grad!(other) do
-    raise ArgumentError,
-          "the first argument of grad must be a tensor expression or a tuple of tensor expressions, " <>
-            "got: #{inspect(other)}"
   end
 
   defp validate_expr!(%T{data: %Expr{}} = expr) do
@@ -73,7 +64,7 @@ defmodule Nx.Defn.Grad do
   defp stop_grads(%T{data: %Expr{id: id}}, ids),
     do: Map.put(ids, id, :stop)
 
-  defp stop_grads(%_{}, ids),
+  defp stop_grads(%T{}, ids),
     do: ids
 
   defp stop_grads(map, ids) when is_map(map),
@@ -120,7 +111,7 @@ defmodule Nx.Defn.Grad do
 
   defp zerofy_each(t, cache, ids) do
     {args, {cache, tainted?}} =
-      Tree.traverse_args(t, {cache, false}, fn arg, {cache, acc_tainted?} ->
+      Tree.apply_args(t, {cache, false}, fn arg, {cache, acc_tainted?} ->
         {arg, cache, tainted?} = zerofy_ids(arg, cache, ids)
         {arg, {cache, tainted? or acc_tainted?}}
       end)
@@ -143,7 +134,7 @@ defmodule Nx.Defn.Grad do
   # computation. Both are important to reduce the amount of nodes
   # in the AST.
   defp to_grad(expr, res, cache) do
-    Tree.composite(expr, cache, fn
+    Composite.traverse(expr, cache, fn
       %T{data: %Expr{id: id, op: op, args: args}} = ans, {result_cache, no_g_cache} = cache ->
         key = [id | res.data.id]
 
@@ -216,6 +207,11 @@ defmodule Nx.Defn.Grad do
     end
 
     grad_pairs(args, g, cache)
+  end
+
+  defp grad(:attach_token, [token, expr], _ans, g, cache) do
+    {expr, cache} = to_grad(expr, g, cache)
+    {Expr.attach_token(token, expr), cache}
   end
 
   defp grad(:cond, [clauses, last], _ans, g, cache) do
@@ -430,10 +426,10 @@ defmodule Nx.Defn.Grad do
 
     fun =
       if op == :window_min,
-        do: &Nx.scatter_window_min/5,
-        else: &Nx.scatter_window_max/5
+        do: &Nx.window_scatter_min/5,
+        else: &Nx.window_scatter_max/5
 
-    g = fun.(x, g, window_dimensions, [padding: padding, strides: strides], 0)
+    g = fun.(x, g, 0, window_dimensions, padding: padding, strides: strides)
     to_grad(x, g, cache)
   end
 
@@ -539,7 +535,7 @@ defmodule Nx.Defn.Grad do
     g =
       t
       |> Expr.broadcast(0, Nx.shape(t), Nx.axes(t))
-      |> Nx.scatter_add(indices, updates)
+      |> Nx.indexed_add(indices, updates)
 
     to_grad(t, g, cache)
   end
@@ -600,7 +596,7 @@ defmodule Nx.Defn.Grad do
     g =
       t
       |> Expr.broadcast(0, Nx.shape(t), Nx.axes(t))
-      |> Nx.scatter_add(indices, updates)
+      |> Nx.indexed_add(indices, updates)
 
     to_grad(t, g, cache)
   end
@@ -612,7 +608,7 @@ defmodule Nx.Defn.Grad do
     indices = Nx.reshape(i, {num_elements, rank})
     updates = Nx.reshape(g, {num_elements})
 
-    g = t |> Expr.broadcast(0, t.shape, Nx.axes(t)) |> Nx.scatter_add(indices, updates)
+    g = t |> Expr.broadcast(0, t.shape, Nx.axes(t)) |> Nx.indexed_add(indices, updates)
 
     to_grad(t, g, cache)
   end
@@ -624,7 +620,11 @@ defmodule Nx.Defn.Grad do
   ## Gradients that don't rely on g and can be cached more often
 
   defp no_g_grad(:add, [x, y], _ans) do
-    [{x, Expr.tensor(1.0)}, {y, Expr.tensor(1.0)}]
+    if x.data.id == y.data.id do
+      [{x, Expr.tensor(2.0)}]
+    else
+      [{x, Expr.tensor(1.0)}, {y, Expr.tensor(1.0)}]
+    end
   end
 
   defp no_g_grad(:subtract, [x, y], _ans) do
@@ -632,7 +632,11 @@ defmodule Nx.Defn.Grad do
   end
 
   defp no_g_grad(:multiply, [x, y], _ans) do
-    [{x, y}, {y, x}]
+    if x.data.id == y.data.id do
+      [{x, Nx.multiply(y, 2.0)}]
+    else
+      [{x, y}, {y, x}]
+    end
   end
 
   defp no_g_grad(:divide, [x, y], ans) do
@@ -854,13 +858,13 @@ defmodule Nx.Defn.Grad do
     """
   end
 
-  defp no_g_grad(:reduce_window, _, _) do
+  defp no_g_grad(:window_reduce, _, _) do
     raise ArgumentError, """
-    cannot compute gradient for Nx.reduce_window/5.
+    cannot compute gradient for Nx.window_reduce/5.
 
     If you are computing the sum, max, or similar of a window, use \
     the appropriate Nx functions instead. If you have a custom usage \
-    of reduce_window, consider using stop_grad/1 (making it equivalent \
+    of window_reduce, consider using stop_grad/1 (making it equivalent \
     to the identify function) or using custom_grad/2 (giving it \
     a proper gradient implementation).
     """

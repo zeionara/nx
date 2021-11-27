@@ -6,7 +6,11 @@ defmodule Nx.Defn.ExprTest do
   doctest Nx.Defn.Expr
 
   import Nx.Defn
-  @default_defn_compiler Nx.Defn.Identity
+
+  setup do
+    Nx.Defn.default_options(compiler: Nx.Defn.Identity)
+    :ok
+  end
 
   describe "constant optimizations" do
     test "broadcast" do
@@ -249,13 +253,24 @@ defmodule Nx.Defn.ExprTest do
     test "with metadata" do
       a = Expr.parameter(nil, {:s, 64}, {}, 0)
 
-      assert Expr.metadata(a, %{foo: true}) |> inspect(safe: false) == """
+      assert Expr.metadata(a, %{}) |> Nx.add(1) |> inspect(safe: false) == """
              #Nx.Tensor<
                s64
              \s\s
                Nx.Defn.Expr
-               parameter a                 s64
-               b = metadata [ a, [:foo] ]  s64
+               parameter a       s64
+               b = add [ 1, a ]  s64
+             >\
+             """
+
+      assert Expr.metadata(a, %{inspect: :foo}) |> Nx.add(1) |> inspect(safe: false) == """
+             #Nx.Tensor<
+               s64
+             \s\s
+               Nx.Defn.Expr
+               parameter a               s64
+               b = metadata [ a, :foo ]  s64
+               c = add [ 1, b ]          s64
              >\
              """
     end
@@ -337,6 +352,34 @@ defmodule Nx.Defn.ExprTest do
                parameter a             f32
                b = while [ {1.0, a} ]  tuple2
                c = elem [ b, 0, 2 ]    f32
+             >\
+             """
+    end
+
+    defn sub_add_mult(a, b) do
+      token = create_token()
+      {token, add} = hook_token(token, a + b, :add, &IO.inspect({:add, &1}))
+      {token, mult} = hook_token(token, a * b, :mult, &IO.inspect({:mult, &1}))
+      {add, mult} = attach_token(token, {add, mult})
+      add - mult
+    end
+
+    test "with tokens" do
+      result = sub_add_mult(Nx.template({}, {:f, 32}), Nx.template({}, {:f, 32}))
+
+      assert inspect(result, safe: false) == """
+             #Nx.Tensor<
+               f32
+             \s\s
+               Nx.Defn.Expr
+               parameter a                    f32
+               parameter b                    f32
+               c = multiply [ a, b ]          f32
+               d = add [ a, b ]               f32
+               e = token [ mult: c, add: d ]  tuple2
+               f = attach_token [ e, d ]      f32
+               g = attach_token [ e, c ]      f32
+               h = subtract [ f, g ]          f32
              >\
              """
     end

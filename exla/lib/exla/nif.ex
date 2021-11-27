@@ -128,7 +128,7 @@ defmodule EXLA.NIF do
   def variadic_reduce(_builder, _operands, _init_value, _computation, _dimensions),
     do: :erlang.nif_error(:undef)
 
-  def reduce_window(
+  def window_reduce(
         _operand,
         _init_value,
         _computation,
@@ -247,9 +247,6 @@ defmodule EXLA.NIF do
   def get_device_count(_client),
     do: :erlang.nif_error(:undef)
 
-  def get_devices(_client),
-    do: :erlang.nif_error(:undef)
-
   def build(_builder, _root),
     do: :erlang.nif_error(:undef)
 
@@ -285,16 +282,16 @@ defmodule EXLA.NIF do
   def binary_to_device_mem(_client, _binary, _shape, _device_ordinal),
     do: :erlang.nif_error(:undef)
 
-  def read_device_mem(_client, _buffer),
+  def read_device_mem(_client, _buffer, _size),
     do: :erlang.nif_error(:undef)
 
   def deallocate_device_mem(_buffer),
     do: :erlang.nif_error(:undef)
 
-  def transfer_to_infeed(_client, _device, _data, _shape),
+  def transfer_to_infeed(_client, _device, _data_shapes),
     do: :erlang.nif_error(:undef)
 
-  def transfer_from_outfeed(_client, _device, _shape),
+  def transfer_from_outfeed(_client, _device, _shapes, _pid, _ref),
     do: :erlang.nif_error(:undef)
 
   def start_log_sink(_sink_pid),

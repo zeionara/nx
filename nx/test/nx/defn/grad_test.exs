@@ -39,9 +39,7 @@ defmodule Nx.Defn.GradTest do
     end
 
     test "raises on invalid" do
-      assert_raise ArgumentError,
-                   "the first argument of grad must be a tensor expression or a tuple of tensor expressions, got: :invalid",
-                   fn -> grad_invalid(Nx.tensor(1)) end
+      assert_raise Protocol.UndefinedError, fn -> grad_invalid(Nx.tensor(1)) end
     end
   end
 
@@ -54,6 +52,32 @@ defmodule Nx.Defn.GradTest do
       assert vg(1, 2) ==
                {Nx.tensor(4.761594155955764, type: {:f, 32}),
                 {Nx.tensor(0.41997434161402614), Nx.tensor(4.0)}}
+    end
+  end
+
+  describe "tokens" do
+    defn grad_token(t), do: grad(t, fn t -> hook(Nx.power(t, 2), :grad) end)
+
+    test "computes grad with token" do
+      parent = self()
+
+      assert Nx.Defn.jit(&grad_token/1, [Nx.tensor(3)], hooks: %{grad: &send(parent, {:hook, &1})}) ==
+               Nx.tensor(6.0)
+
+      assert_receive {:hook, tensor}
+      assert tensor == Nx.tensor(9)
+    end
+
+    defn token_grad(t), do: hook(grad(t, &Nx.power(&1, 2)), :grad)
+
+    test "computes token with grad" do
+      parent = self()
+
+      assert Nx.Defn.jit(&token_grad/1, [Nx.tensor(3)], hooks: %{grad: &send(parent, {:hook, &1})}) ==
+               Nx.tensor(6.0)
+
+      assert_receive {:hook, tensor}
+      assert tensor == Nx.tensor(6.0)
     end
   end
 

@@ -24,7 +24,7 @@ defmodule Torchx.NxDoctestTest do
     broadcast: 3,
     # dot - Batching not supported
     dot: 6,
-    # make_diagonal - depends on scatter_add
+    # make_diagonal - depends on indexed_add
     make_diagonal: 2,
     # mean - Torchx expects a input tensor but receives a number as input
     mean: 2,
@@ -60,7 +60,9 @@ defmodule Torchx.NxDoctestTest do
     # bitcast - no API available
     bitcast: 2,
     # default_backend - specific to BinaryBackend
-    default_backend: 1
+    default_backend: 1,
+    # product - some output/input types are unsupported by libtorch
+    product: 2
   ]
 
   doctest Nx,

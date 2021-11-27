@@ -14,6 +14,7 @@ defmodule Nx.MixProject do
       name: "Nx",
       version: @version,
       elixir: "~> 1.12-dev",
+      elixirc_paths: elixirc_paths(Mix.env()),
       deps: deps(),
       docs: docs()
     ]
@@ -22,9 +23,12 @@ defmodule Nx.MixProject do
   def application do
     [
       extra_applications: [:logger],
-      env: [default_backend: {Nx.BinaryBackend, []}]
+      env: [default_backend: {Nx.BinaryBackend, []}, default_defn_options: []]
     ]
   end
+
+  defp elixirc_paths(:test), do: ~w(lib test/support)
+  defp elixirc_paths(_), do: ~w(lib)
 
   defp deps do
     [
@@ -35,6 +39,7 @@ defmodule Nx.MixProject do
   defp docs do
     [
       main: "Nx",
+      logo: "numbat.png",
       source_ref: "v#{@version}",
       source_url: @source_url,
       groups_for_functions: [
@@ -43,17 +48,26 @@ defmodule Nx.MixProject do
         "Functions: Conversion": &(&1[:type] == :conversion),
         "Functions: Creation": &(&1[:type] in [:creation, :random]),
         "Functions: Element-wise": &(&1[:type] == :element),
+        "Functions: Indexed": &(&1[:type] == :indexed),
         "Functions: N-dim": &(&1[:type] == :ndim),
         "Functions: Shape": &(&1[:type] == :shape),
-        "Functions: Type": &(&1[:type] == :type)
+        "Functions: Type": &(&1[:type] == :type),
+        "Functions: Window": &(&1[:type] == :window)
       ],
       groups_for_modules: [
         # Nx,
         # Nx.Defn,
         # Nx.Defn.Kernel,
         # Nx.LinAlg,
-        # Nx.Stream,
 
+        Protocols: [
+          Nx.Container,
+          Nx.Stream
+        ],
+        Structs: [
+          Nx.Heatmap,
+          Nx.Tensor
+        ],
         Backends: [
           Nx.Backend,
           Nx.BinaryBackend,
@@ -62,13 +76,10 @@ defmodule Nx.MixProject do
         ],
         Compilers: [
           Nx.Defn.Compiler,
+          Nx.Defn.Composite,
           Nx.Defn.Evaluator,
           Nx.Defn.Expr,
           Nx.Defn.Tree
-        ],
-        Structs: [
-          Nx.Heatmap,
-          Nx.Tensor
         ]
       ]
     ]

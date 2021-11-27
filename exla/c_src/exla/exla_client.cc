@@ -12,13 +12,15 @@ ExlaBuffer::ExlaBuffer(std::unique_ptr<xla::PjRtBuffer> buffer,
                        bool can_be_released_after_run): buffer_(std::move(buffer)),
                                                         can_be_released_after_run_(can_be_released_after_run) {}
 
-void CopyLiteralToBinary(xla::Literal* literal, ErlNifBinary* binary) {
-  enif_alloc_binary(literal->size_bytes(), binary);
-  std::memcpy(binary->data, literal->untyped_data(), literal->size_bytes());
+void CopyLiteralToBinary(xla::Literal* literal, ErlNifBinary* binary, exla::int64 size) {
+  exla::int64 actual_size = literal->size_bytes();
+  if(size < 0 or size > actual_size) size = actual_size;
+  enif_alloc_binary(size, binary);
+  std::memcpy(binary->data, literal->untyped_data(), size);
 }
 
-xla::StatusOr<ERL_NIF_TERM> ExlaBuffer::ToBinary(ErlNifEnv* env) {
-  buffer_->BlockHostUntilReady();
+xla::StatusOr<ERL_NIF_TERM> ExlaBuffer::ToBinary(ErlNifEnv* env, exla::int64 size) {
+  EXLA_EFFECT_OR_RETURN(buffer_->BlockHostUntilReady());
   EXLA_ASSIGN_OR_RETURN(std::shared_ptr<xla::Literal> literal, buffer_->ToLiteral());
 
   ErlNifBinary binary;
@@ -26,13 +28,17 @@ xla::StatusOr<ERL_NIF_TERM> ExlaBuffer::ToBinary(ErlNifEnv* env) {
   xla::Shape host_shape = xla::ShapeUtil::MakeShape(buffer_->on_device_shape().element_type(), buffer_->on_device_shape().dimensions());
 
   if (xla::LayoutUtil::LayoutsInShapesEqual(host_shape, literal->shape())) {
-    CopyLiteralToBinary(literal.get(), &binary);
+    CopyLiteralToBinary(literal.get(), &binary, size);
   } else {
     xla::Literal new_literal = literal->Relayout(host_shape);
-    CopyLiteralToBinary(&new_literal, &binary);
+    CopyLiteralToBinary(&new_literal, &binary, size);
   }
 
   return nif::make(env, binary);
+}
+
+xla::Status ExlaBuffer::BlockHostUntilReady() {
+  return buffer_->BlockHostUntilReady();
 }
 
 xla::Status ExlaBuffer::Deallocate() {
@@ -98,7 +104,7 @@ xla::StatusOr<ERL_NIF_TERM> UnpackResult(ErlNifEnv* env, std::vector<std::unique
     if (keep_on_device) {
       term = nif::make<ExlaBuffer*>(env, buf);
     } else {
-      EXLA_ASSIGN_OR_RETURN_NIF(term, buf->ToBinary(env), env);
+      EXLA_ASSIGN_OR_RETURN_NIF(term, buf->ToBinary(env, -1), env);
       delete buf;
     }
     terms.push_back(term);
@@ -135,11 +141,14 @@ xla::StatusOr<ERL_NIF_TERM> ExlaExecutable::Run(ErlNifEnv* env,
 
   for (auto buf : input_buffers) {
     pjrt_buffers.push_back(buf->buffer());
+
     // If the buffer was not received as a resource (e.g. we converted
-    // it from a binary to a buffer), we need to make it a resource so
-    // it's tracked and GC'ed along with other buffers that are no longer
-    // in use
+    // it from a binary to a buffer), we need to make sure it has been
+    // fully transferred before we exit the NIF and make it a resource
+    // so it's tracked and GC'ed along with other buffers that are no
+    // longer in use
     if (buf->release_after_run()) {
+      EXLA_EFFECT_OR_RETURN_NIF(buf->BlockHostUntilReady(), env);
       terms.push_back(nif::make<ExlaBuffer*>(env, buf));
     }
   }
@@ -165,7 +174,7 @@ xla::StatusOr<ExlaBuffer*> ExlaClient::BufferFromBinary(const ErlNifBinary& bina
                                                         xla::Shape& shape,
                                                         int device_id,
                                                         bool can_be_released_after_run) {
-  xla::PjRtClient::HostBufferSemantics semantics = xla::PjRtClient::HostBufferSemantics::kZeroCopy;
+  xla::PjRtClient::HostBufferSemantics semantics = xla::PjRtClient::HostBufferSemantics::kImmutableUntilTransferCompletes;
 
   EXLA_ASSIGN_OR_RETURN(xla::PjRtDevice* device, client_->LookupDevice(device_id));
   EXLA_ASSIGN_OR_RETURN(auto buffer, client_->BufferFromHostBuffer(binary.data, shape, semantics, nullptr, device));
@@ -199,21 +208,54 @@ xla::StatusOr<ExlaExecutable*> ExlaClient::Compile(const xla::XlaComputation& co
   return new ExlaExecutable(std::move(executable), std::move(fingerprint), this);
 }
 
-std::vector<ExlaDevice*> ExlaClient::GetDevices() {
- absl::Span<xla::PjRtDevice* const> pjrt_devices = client_->devices();
+xla::Status ExlaClient::TransferToInfeed(ErlNifEnv* env,
+                                         ERL_NIF_TERM data,
+                                         const xla::Shape& shape,
+                                         int device_id) {
+  // Tuples need to be decomposed a bit
+  if (shape.IsTuple()) {
+    // unsupported right now
+    if (xla::ShapeUtil::IsNestedTuple(shape)) {
+      return xla::InvalidArgument("nested tuples are not supported in infeed operation");
+    }
 
-  std::vector<ExlaDevice*> devices;
-  devices.reserve(pjrt_devices.size());
-  for (auto pjrt_device : pjrt_devices) {
-    ExlaDevice* device = new ExlaDevice(pjrt_device, this);
-    devices.push_back(device);
+    int num_elements = xla::ShapeUtil::TupleElementCount(shape);
+    std::vector<const char*> buf_ptrs;
+    buf_ptrs.reserve(num_elements);
+
+    ERL_NIF_TERM head, tail;
+    while (enif_get_list_cell(env, data, &head, &tail)) {
+      ErlNifBinary tmp_bin;
+      if (!nif::get_binary(env, head, &tmp_bin)) {
+        return xla::InvalidArgument("infeed operation expects a list of binaries");
+      }
+
+      const char * data_ptr = const_cast<char *>(reinterpret_cast<char *>(tmp_bin.data));
+      buf_ptrs.push_back(data_ptr);
+      data = tail;
+    }
+
+    xla::BorrowingLiteral literal(buf_ptrs, shape);
+
+    EXLA_ASSIGN_OR_RETURN(xla::PjRtDevice* device, client_->LookupDevice(device_id));
+
+    xla::Status status = device->TransferToInfeed(literal);
+
+    return status;
   }
 
-  return devices;
-}
+  // Fast path to avoid any traversal when not sending Tuples
+  ERL_NIF_TERM head, tail;
+  if (!enif_get_list_cell(env, data, &head, &tail)) {
+    return xla::InvalidArgument("infeed operation expects a list of binaries");
+  }
 
-xla::Status ExlaClient::TransferToInfeed(int device_id, ErlNifBinary data, const xla::Shape& shape) {
-  const char * data_ptr = const_cast<char *>(reinterpret_cast<char *>(data.data));
+  ErlNifBinary binary;
+  if (!nif::get_binary(env, head, &binary)) {
+    return xla::InvalidArgument("infeed operation expects a list of binaries");
+  }
+
+  const char * data_ptr = const_cast<char *>(reinterpret_cast<char *>(binary.data));
   xla::BorrowingLiteral literal(data_ptr, shape);
 
   EXLA_ASSIGN_OR_RETURN(xla::PjRtDevice* device, client_->LookupDevice(device_id));
@@ -225,6 +267,7 @@ xla::StatusOr<ERL_NIF_TERM> ExlaClient::TransferFromOutfeed(ErlNifEnv* env, int 
   EXLA_ASSIGN_OR_RETURN(xla::PjRtDevice* device, client_->LookupDevice(device_id));
 
   auto literal = std::make_shared<xla::Literal>(shape);
+
   xla::Status transfer_status = device->TransferFromOutfeed(literal.get());
 
   if (!transfer_status.ok()) {

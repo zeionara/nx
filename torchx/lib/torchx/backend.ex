@@ -429,6 +429,62 @@ defmodule Torchx.Backend do
   end
 
   @impl true
+  def product(%T{type: out_type} = out, %T{} = t, opts) do
+    check_type!(out_type)
+
+    axes = opts[:axes] || []
+    keep_axes = opts[:keep_axes] || false
+
+    result =
+      if axes == [] do
+        product_whole_tensor(t, keep_axes)
+      else
+        product_over_axes(t, axes, keep_axes)
+      end
+
+    to_nx(result, out)
+  end
+
+  defp product_whole_tensor(t, keep_axes) do
+    prod =
+      t
+      |> from_nx()
+      |> Torchx.product()
+
+    if keep_axes do
+      shape = t.shape |> Tuple.delete_at(-1) |> Tuple.append(1)
+      Torchx.reshape(prod, shape)
+    else
+      prod
+    end
+  end
+
+  defp product_over_axes(t, axes, keep_axes) do
+    {_, result_tx} =
+      for _ <- 1..length(axes), reduce: {axes, from_nx(t)} do
+        {[], t_tx} ->
+          {[], t_tx}
+
+        {[axis | axes], t_tx} ->
+          # We need to offset all subsequent axes if keep_axes == false.
+          # If keep_axes == true, we can use the same axis numbers as the
+          # incoming tensor.
+          axes =
+            if keep_axes do
+              axes
+            else
+              for x <- axes do
+                if x > axis, do: x - 1, else: x
+              end
+            end
+
+          {axes, Torchx.product(t_tx, axis, keep_axes)}
+      end
+
+    result_tx
+  end
+
+  @impl true
   def argmax(%T{} = out, %T{} = t, opts) do
     unsupported_option!(opts, :tie_break, :low)
 
@@ -551,13 +607,117 @@ defmodule Torchx.Backend do
 
   @impl true
   def cholesky(%T{} = out, %T{} = t) do
-    Torchx.cholesky(from_nx(t)) |> to_nx(out)
+    t
+    |> from_nx()
+    |> Torchx.cholesky()
+    |> to_nx(out)
   end
 
   @impl true
   def qr({q_holder, r_holder}, tensor, opts) do
     {q, r} = Torchx.qr(from_nx(tensor), opts[:mode] == :reduced)
     {to_nx(q, q_holder), to_nx(r, r_holder)}
+  end
+
+  @impl true
+  def lu(
+        {p_holder, %{type: output_type} = l_holder, %{type: output_type} = u_holder},
+        tensor,
+        _opts
+      ) do
+    out_type = to_torch_type(output_type)
+
+    {p_tx, l_tx, u_tx} =
+      tensor
+      |> from_nx()
+      |> Torchx.to_type(out_type)
+      |> Torchx.lu()
+
+    p_type = to_torch_type(p_holder.type)
+
+    # p_type can be an integer type, but we can
+    # demote the floating-point torch tensor
+    # without any loss because p_tx is a tensor
+    # of zeros or ones only
+
+    p =
+      p_tx
+      |> Torchx.to_type(p_type)
+      |> to_nx(p_holder)
+
+    l = to_nx(l_tx, l_holder)
+    u = to_nx(u_tx, u_holder)
+
+    {p, l, u}
+  end
+
+  @impl true
+  def triangular_solve(%T{} = out, %T{} = a, %T{} = b, opts) do
+    transform = opts[:transform_a]
+    upper = !opts[:lower]
+    left_side = opts[:left_side]
+
+    # We can support this eventually, but we'd need
+    # to apply the same permutations BinaryBackend applies,
+    # because this is not natively supported by libtorch
+    unless left_side do
+      raise ArgumentError, "left_side: false option not supported in Torchx"
+    end
+
+    batched_a_shape = Tuple.insert_at(a.shape, 0, 1)
+
+    batched_b_shape =
+      case b.shape do
+        {n} -> {1, n, 1}
+        {m, n} -> {1, m, n}
+      end
+
+    out_type = to_torch_type(out.type)
+
+    a_tx =
+      a
+      |> from_nx()
+      |> Torchx.reshape(batched_a_shape)
+      |> Torchx.to_type(out_type)
+
+    eps = 1.0e-10 |> Nx.tensor() |> Torchx.from_nx()
+
+    # We need to manually validate if the A tensor is singular
+    # (i.e. the tensor has its determinant equal to 0)
+    # Otherwise, an exception will be thrown by libtorch.
+    #
+    # a non-zero eps value is chosen so we can account for possible rounding errors
+    # in the determinant calculation
+    is_singular =
+      a_tx
+      |> Torchx.determinant()
+      |> Torchx.abs()
+      |> Torchx.reshape({})
+      |> Torchx.less_equal(eps)
+      |> Torchx.to_nx()
+      |> Nx.backend_transfer(Nx.BinaryBackend)
+
+    if Nx.tensor(1, type: {:u, 8}, backend: Nx.BinaryBackend) == is_singular do
+      raise ArgumentError, "can't solve for singular matrix"
+    end
+
+    b_tx = b |> from_nx() |> Torchx.reshape(batched_b_shape) |> Torchx.to_type(out_type)
+
+    a_tx
+    |> Torchx.triangular_solve(b_tx, transform == :transpose, upper)
+    |> Torchx.reshape(out.shape)
+    |> Torchx.to_nx()
+  end
+
+  @impl true
+  def sort(%T{} = out, %T{} = t, opts) do
+    axis = opts[:axis]
+    descending = opts[:direction] == :desc
+
+    t
+    |> from_nx()
+    |> Torchx.sort(axis, descending)
+    |> to_nx(out)
   end
 
   @impl true
@@ -689,7 +849,7 @@ defmodule Torchx.Backend do
 
   ## Functionality we can't provide
 
-  not_possible = [bitcast: 2, map: 4, population_count: 2, reduce: 5, reduce_window: 6]
+  not_possible = [bitcast: 2, map: 4, population_count: 2, reduce: 5, window_reduce: 6]
 
   for {fun, arity} <- not_possible do
     args = Macro.generate_arguments(arity, __MODULE__)

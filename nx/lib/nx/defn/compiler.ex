@@ -48,7 +48,8 @@ defmodule Nx.Defn.Compiler do
 
   # These operations do not have valid meaning for Nx.Defn.Expr
   @forbidden_ops [:backend_copy, :backend_deallocate, :backend_transfer] ++
-                   [:to_binary, :to_scalar, :to_flat_list, :to_heatmap, :to_batched_list]
+                   [:to_binary, :to_scalar, :to_flat_list, :to_heatmap, :to_batched_list] ++
+                   [:from_numpy, :from_numpy_archive, :compatible?, :default_backend]
 
   defguardp is_var(var)
             when is_tuple(var) and tuple_size(var) == 3 and is_atom(elem(var, 0)) and
@@ -83,25 +84,24 @@ defmodule Nx.Defn.Compiler do
 
   defp runtime(fun, args, opts) do
     {compiler, opts} = Keyword.pop(opts, :compiler, Nx.Defn.Evaluator)
-    tensors = Nx.Defn.Tree.from_runtime_args(args)
+    tensors = Nx.Defn.Composite.from_runtime_args(args, [])
     runtime_fun = &runtime_fun(&1, fun, args, compiler)
     {compiler, [tensors, runtime_fun, opts]}
   end
 
   defp runtime_fun(tensors, fun, args, compiler) do
-    if Process.get(Nx.Defn.Compiler) do
-      raise "cannot trigger JIT compilation when there is already a JIT compilation happening"
-    end
-
+    tuple = Nx.default_backend()
+    Nx.default_backend(Nx.Defn.Expr)
     Process.put(Nx.Defn.Compiler, compiler)
 
     try do
-      args = Nx.Defn.Tree.args_to_params(args, tensors)
+      args = Nx.Defn.Composite.args_to_params(args, tensors)
 
       fun
       |> apply(args)
-      |> Nx.Defn.Tree.to_result()
+      |> Nx.Defn.Composite.to_result()
     after
+      Nx.default_backend(tuple)
       Process.delete(Nx.Defn.Compiler)
     end
   end
@@ -155,7 +155,7 @@ defmodule Nx.Defn.Compiler do
   end
 
   defp compile_each({{name, arity} = def, def_meta}, state) do
-    %{compiler: {def_module, def_opts}, defaults: defaults} = def_meta
+    %{defaults: defaults} = def_meta
     {{kind, _meta, args, ast}, state} = get_and_normalize_definition(def, state)
 
     defn_name = defn_name(name)
@@ -193,33 +193,27 @@ defmodule Nx.Defn.Compiler do
         if Process.get(Nx.Defn.Compiler) do
           unquote(defn_name)(unquote_splicing(all_args))
         else
-          fun = unquote(fun)
-          args = unquote(fn_args)
-          {cache, tensors} = Nx.Defn.Tree.from_compile_args(args, fun)
-
-          unquote(def_module).__jit__(
-            cache,
-            Nx.Defn.Tree.from_runtime_args(tensors),
-            fn tensors ->
-              Process.put(Nx.Defn.Compiler, unquote(def_module))
-
-              try do
-                args = Nx.Defn.Tree.args_to_params(args, tensors)
-
-                fun
-                |> apply(args)
-                |> Nx.Defn.Tree.to_result()
-              after
-                Process.delete(Nx.Defn.Compiler)
-              end
-            end,
-            unquote(Macro.escape(def_opts))
-          )
+          Nx.Defn.Compiler.__runtime__(unquote(fun), unquote(fn_args))
         end
       end
 
       Kernel.unquote(kind)(unquote(defn_name)(unquote_splicing(defn_args)), do: unquote(ast))
     end
+  end
+
+  @doc false
+  def __runtime__(fun, args) do
+    {compiler, compiler_opts} =
+      Keyword.pop(Nx.Defn.default_options(), :compiler, Nx.Defn.Evaluator)
+
+    {cache, tensors} = Nx.Defn.Composite.from_compile_args(args, fun)
+
+    compiler.__jit__(
+      cache,
+      Nx.Defn.Composite.from_runtime_args(tensors, []),
+      &runtime_fun(&1, fun, args, compiler),
+      compiler_opts
+    )
   end
 
   defp get_and_normalize_definition(def, state) do
@@ -357,6 +351,20 @@ defmodule Nx.Defn.Compiler do
     {{call, meta, [ast, fun]}, state}
   end
 
+  defp normalize({{:., _, [Nx.Defn.Kernel, :hook]} = call, meta, [ast | rest]}, state) do
+    {ast, state} = normalize(ast, state)
+    {{call, meta, [ast | rest]}, state}
+  end
+
+  defp normalize(
+         {{:., _, [Nx.Defn.Kernel, :hook_token]} = call, meta, [token, ast | rest]},
+         state
+       ) do
+    {token, state} = normalize(token, state)
+    {ast, state} = normalize(ast, state)
+    {{call, meta, [token, ast | rest]}, state}
+  end
+
   defp normalize({{:., dot_meta, [mod, name]}, meta, args}, state)
        when mod in [Nx, Nx.LinAlg, Nx.Defn, Nx.Defn.Kernel] do
     if name in @forbidden_ops do
@@ -365,7 +373,6 @@ defmodule Nx.Defn.Compiler do
     end
 
     {args, state} = normalize_list(args, state)
-    args = rewrite_args(name, args)
     {{{:., dot_meta, [mod, name]}, meta, args}, state}
   end
 
@@ -426,35 +433,6 @@ defmodule Nx.Defn.Compiler do
       "invalid numerical expression:\n\n    #{string}\n"
     )
   end
-
-  ## Rewrite args
-
-  defp rewrite_args(:tensor, [t]), do: [t, add_backend([])]
-  defp rewrite_args(:tensor, [t, opts]), do: [t, add_backend(opts)]
-
-  defp rewrite_args(:from_binary, [bin, type]), do: [bin, type, add_backend([])]
-  defp rewrite_args(:from_binary, [bin, type, opts]), do: [bin, type, add_backend(opts)]
-
-  defp rewrite_args(:iota, [t]), do: [t, add_backend([])]
-  defp rewrite_args(:iota, [t, opts]), do: [t, add_backend(opts)]
-
-  defp rewrite_args(:eye, [n]), do: [n, add_backend([])]
-  defp rewrite_args(:eye, [n, opts]), do: [n, add_backend(opts)]
-
-  defp rewrite_args(:random_uniform, [t]), do: [t, add_backend([])]
-  defp rewrite_args(:random_uniform, [t, opts]), do: [t, add_backend(opts)]
-  defp rewrite_args(:random_uniform, [t, min, max]), do: [t, min, max, add_backend([])]
-  defp rewrite_args(:random_uniform, [t, min, max, opts]), do: [t, min, max, add_backend(opts)]
-
-  defp rewrite_args(:random_normal, [t]), do: [t, add_backend([])]
-  defp rewrite_args(:random_normal, [t, opts]), do: [t, add_backend(opts)]
-  defp rewrite_args(:random_normal, [t, mu, sigma]), do: [t, mu, sigma, add_backend([])]
-  defp rewrite_args(:random_normal, [t, mu, sigma, opts]), do: [t, mu, sigma, add_backend(opts)]
-
-  defp rewrite_args(_name, args), do: args
-
-  defp add_backend(list) when is_list(list), do: [backend: Nx.Defn.Expr] ++ list
-  defp add_backend(expr), do: quote(do: Keyword.put(unquote(expr), :backend, Nx.Defn.Expr))
 
   ## Normalize args
 
