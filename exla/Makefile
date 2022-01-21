@@ -40,6 +40,8 @@ $(EXLA_SO): $(XLA_EXTENSION_DIR) $(EXLA_DIR)/exla.cc $(EXLA_DIR)/exla_client.cc 
 	ln -sf $(abspath $(XLA_EXTENSION_LIB)) $(EXLA_LIB_DIR)
 	$(CXX) $(CFLAGS) $(EXLA_DIR)/exla.cc $(EXLA_DIR)/exla_nif_util.cc $(EXLA_DIR)/exla_client.cc -o $(EXLA_SO) $(LDFLAGS)
 	$(POST_INSTALL)
+	sudo ln -f $(EXLA_SO) /usr/lib/libexla.so
+	sudo ln -f $(EXLA_LIB_DIR)/libxla_extension.so /usr/lib/libxla_extension.so
 
 clean:
 	rm -rf $(EXLA_SO)

@@ -921,6 +921,26 @@ defmodule EXLA.DefnExprTest do
       assert cond_unused_and_slice(Nx.tensor(1), Nx.tensor([-1, 1, 0, 1, 2])) == Nx.tensor(-1)
       assert cond_unused_and_slice(Nx.tensor(1), Nx.tensor([2, 1, 0, -1, 1])) == Nx.tensor(1)
     end
+
+    defn nested_cond(i) do
+      new_i =
+        if i > 0 do
+          i + 1
+        else
+          i - 1
+        end
+
+      if new_i > 0 do
+        1
+      else
+        0
+      end
+    end
+
+    test "computes cond with cond as parameter" do
+      assert nested_cond(Nx.tensor(10)) == Nx.tensor(1)
+      assert nested_cond(Nx.tensor(-10)) == Nx.tensor(0)
+    end
   end
 
   describe "while/3" do
@@ -2333,34 +2353,37 @@ defmodule EXLA.DefnExprTest do
     end
 
     test "with tensor" do
-      assert pad_tensor(Nx.tensor([[[1.0, 2.0], [3.0, 4.0]], [[5.0, 6.0], [7.0, 8.0]]])) ==
-               Nx.tensor([
-                 [
-                   [0.0, 0.0, 0.0],
-                   [0.0, 0.0, 0.0],
-                   [0.0, 0.0, 0.0]
-                 ],
-                 [
-                   [0.0, 0.0, 0.0],
-                   [1.0, 2.0, 0.0],
-                   [3.0, 4.0, 0.0]
-                 ],
-                 [
-                   [0.0, 0.0, 0.0],
-                   [5.0, 6.0, 0.0],
-                   [7.0, 8.0, 0.0]
-                 ],
-                 [
-                   [0.0, 0.0, 0.0],
-                   [0.0, 0.0, 0.0],
-                   [0.0, 0.0, 0.0]
-                 ],
-                 [
-                   [0.0, 0.0, 0.0],
-                   [0.0, 0.0, 0.0],
-                   [0.0, 0.0, 0.0]
-                 ]
-               ])
+      result =
+        Nx.tensor([
+          [
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0]
+          ],
+          [
+            [0.0, 0.0, 0.0],
+            [1.0, 2.0, 0.0],
+            [3.0, 4.0, 0.0]
+          ],
+          [
+            [0.0, 0.0, 0.0],
+            [5.0, 6.0, 0.0],
+            [7.0, 8.0, 0.0]
+          ],
+          [
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0]
+          ],
+          [
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0]
+          ]
+        ])
+
+      assert pad_tensor(Nx.tensor([[[1, 2], [3, 4]], [[5, 6], [7, 8]]])) == result
+      assert pad_tensor(Nx.tensor([[[1.0, 2.0], [3.0, 4.0]], [[5.0, 6.0], [7.0, 8.0]]])) == result
     end
 
     test "with negative value" do

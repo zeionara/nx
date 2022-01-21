@@ -3,9 +3,20 @@ defmodule EXLA.NIF do
   @on_load :__on_load__
 
   def __on_load__ do
-    path = :filename.join(:code.priv_dir(:exla), 'libexla')
-    :erlang.load_nif(path, 0)
+    # path = :filename.join(priv_dir(:exla, 'dev'), 'libexla')
+    # :erlang.load_nif(path, 0)
+    :erlang.load_nif("/usr/lib/libexla", 0)
   end
+
+  # def priv_dir(lib, env) do 
+  #   case Application.fetch_env(:grapex, :project_root) do
+  #     {:ok, path} -> :filename.join(path, "_build/#{env}/lib/#{lib}/priv")
+  #     _ -> raise "Cannot read configuration key 'project_root'"
+  #   end
+  # end
+
+  # def priv_dir(lib),
+  #   do: priv_dir(lib, Mix.env)
 
   def new_builder(_name),
     do: :erlang.nif_error(:undef)
