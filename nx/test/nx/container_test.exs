@@ -3,13 +3,13 @@ defmodule Nx.ContainerTest do
 
   test "to_template" do
     assert Nx.to_template(%Container{a: 1, b: 2, c: 3, d: 4}) ==
-             %Container{a: Nx.template({}, {:s, 64}), b: Nx.template({}, {:s, 64}), c: nil, d: 4}
+             %Container{a: Nx.template({}, {:s, 64}), b: Nx.template({}, {:s, 64}), c: %{}, d: 4}
 
     assert Nx.to_template(%Container{a: 1, b: {2, 3.0}, c: 4, d: 5}) ==
              %Container{
                a: Nx.template({}, {:s, 64}),
                b: {Nx.template({}, {:s, 64}), Nx.template({}, {:f, 32})},
-               c: nil,
+               c: %{},
                d: 5
              }
   end
@@ -43,7 +43,7 @@ defmodule Nx.ContainerTest do
     alias Container, as: C
 
     setup do
-      Nx.Defn.default_options(compiler: Nx.Defn.Identity)
+      Nx.Defn.default_options(compiler: Nx.Defn.Debug)
       :ok
     end
 
@@ -133,17 +133,34 @@ defmodule Nx.ContainerTest do
     end
 
     defn dot_assert_fields(var) do
-      transform(var, &assert_fields!/1)
+      assert_fields!(var)
       var.a + var.b
     end
 
-    defp assert_fields!(%C{c: nil, d: :keep}), do: 1
+    deftransformp assert_fields!(%C{c: %{}, d: :keep}), do: 1
 
     test "keeps fields" do
       inp = %Container{a: 1, b: 2, c: :reset, d: :keep}
 
       assert %T{shape: {}, type: {:s, 64}, data: %Expr{op: :add, args: [left, right]}} =
                dot_assert_fields(inp)
+
+      assert %T{data: %Expr{op: :parameter, args: [0]}, type: {:s, 64}} = left
+      assert %T{data: %Expr{op: :parameter, args: [1]}, type: {:s, 64}} = right
+    end
+
+    defn dot_assert_fields_2(var) do
+      dot_assert_fields_transform(var)
+      var.a + var.b
+    end
+
+    deftransformp dot_assert_fields_transform(%C{c: %{}, d: %{}}), do: 1
+
+    test "keeps empty maps" do
+      inp = %Container{a: 1, b: 2, c: :reset, d: %{}}
+
+      assert %T{shape: {}, type: {:s, 64}, data: %Expr{op: :add, args: [left, right]}} =
+               dot_assert_fields_2(inp)
 
       assert %T{data: %Expr{op: :parameter, args: [0]}, type: {:s, 64}} = left
       assert %T{data: %Expr{op: :parameter, args: [1]}, type: {:s, 64}} = right

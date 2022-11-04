@@ -1,6 +1,7 @@
 defmodule Nx.Defn.KernelTest do
   use ExUnit.Case, async: true
 
+  require Nx.Defn.Kernel
   alias Nx.Tensor, as: T
   alias Nx.Defn.Expr
 
@@ -23,6 +24,10 @@ defmodule Nx.Defn.KernelTest do
 
     test "*" do
       assert Nx.Defn.Kernel.*(1, 2) == 2
+    end
+
+    test "**" do
+      assert Nx.Defn.Kernel.**(1, 2) == 1
     end
 
     test "/" do
@@ -102,6 +107,10 @@ defmodule Nx.Defn.KernelTest do
       assert Nx.Defn.Kernel.max(0, 1) == 1
     end
 
+    test "div" do
+      assert Nx.Defn.Kernel.div(11, 5) == 2
+    end
+
     test "rem" do
       assert Nx.Defn.Kernel.rem(1, 5) == 1
     end
@@ -113,18 +122,6 @@ defmodule Nx.Defn.KernelTest do
 
   describe "inside defn" do
     import Nx.Defn
-
-    defn assert_square_matrix(tensor) do
-      assert_shape_pattern(tensor, {x, x})
-    end
-
-    test "assert_shape_pattern" do
-      assert_square_matrix(Nx.tensor([[1, 2], [3, 4]]))
-
-      assert_raise ArgumentError,
-                   "expected tensor to match shape {x, x}, got tensor with shape {1, 2}",
-                   fn -> assert_square_matrix(Nx.tensor([[1, 2]])) end
-    end
 
     defn tap_and_then(a, b, c) do
       a
@@ -140,6 +137,13 @@ defmodule Nx.Defn.KernelTest do
     test "tap and then" do
       assert tap_and_then(1, 2, 3) == Nx.tensor(0)
       assert_received {:expr, %Nx.Tensor{data: %Nx.Defn.Expr{}}}
+    end
+
+    import Nx.Defn.Kernel, only: [keyword!: 2]
+    defn defn_after_import(tensor), do: -tensor
+
+    test "defn after import works" do
+      assert defn_after_import(1) == Nx.tensor(-1)
     end
   end
 
@@ -185,7 +189,9 @@ defmodule Nx.Defn.KernelTest do
       assert expr == zero_expr()
       assert "hook_" <> _ = Atom.to_string(name)
 
-      {token, expr} = Nx.Defn.Kernel.hook_token(initial_token, zero_expr(), :a, &Function.identity/1)
+      {token, expr} =
+        Nx.Defn.Kernel.hook_token(initial_token, zero_expr(), :a, &Function.identity/1)
+
       assert [%{name: :a, callback: callback, expr: ^expr}] = token.hooks
       assert callback == (&Function.identity/1)
       assert expr == zero_expr()

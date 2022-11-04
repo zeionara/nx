@@ -4,6 +4,7 @@ defmodule EXLA.NIF do
 
   def __on_load__ do
     path = :filename.join(priv_dir(:exla, 'dev'), 'libexla')
+    # path = :filename.join(:code.priv_dir(:exla), ~c"libexla")
     :erlang.load_nif(path, 0)
   end
 
@@ -50,9 +51,9 @@ defmodule EXLA.NIF do
   end
 
   unary_ops =
-    [:exp, :expm1, :log, :log1p, :logistic, :cos, :sin, :tanh, :real, :imag, :erf_inv] ++
+    [:exp, :expm1, :log, :log1p, :sigmoid, :cos, :sin, :tanh, :real, :imag, :erf_inv] ++
       [:is_finite, :conj, :acos, :asin, :atan, :cosh, :sinh, :erf, :erfc] ++
-      [:acosh, :asinh, :atanh, :sqrt, :rsqrt, :cbrt, :negate, :sign, :abs] ++
+      [:acosh, :asinh, :atanh, :sqrt, :rsqrt, :cbrt, :is_nan, :is_infinity, :negate, :sign, :abs] ++
       [:bitwise_not, :population_count, :count_leading_zeros, :floor, :ceil, :round]
 
   for op <- unary_ops do
@@ -60,6 +61,9 @@ defmodule EXLA.NIF do
       :erlang.nif_error(:undef)
     end
   end
+
+  def fft(_tensor, _fft_size), do: :erlang.nif_error(:undef)
+  def ifft(_tensor, _fft_size), do: :erlang.nif_error(:undef)
 
   def dot(_a, _b, _precision),
     do: :erlang.nif_error(:undef)
@@ -169,6 +173,9 @@ defmodule EXLA.NIF do
   def while(_cond_fn, _body_fn, _init_value),
     do: :erlang.nif_error(:undef)
 
+  def call(_builder, _args, _body_fn),
+    do: :erlang.nif_error(:undef)
+
   def reshape(_operand, _dimensions),
     do: :erlang.nif_error(:undef)
 
@@ -265,7 +272,6 @@ defmodule EXLA.NIF do
         _client,
         _executable,
         _arguments,
-        _keep_on_device,
         _device_id
       ),
       do: :erlang.nif_error(:undef)
@@ -274,7 +280,6 @@ defmodule EXLA.NIF do
         _client,
         _executable,
         _arguments,
-        _keep_on_device,
         _device_id
       ),
       do: :erlang.nif_error(:undef)
@@ -282,7 +287,7 @@ defmodule EXLA.NIF do
   def binary_to_device_mem(_client, _binary, _shape, _device_ordinal),
     do: :erlang.nif_error(:undef)
 
-  def read_device_mem(_client, _buffer, _size),
+  def read_device_mem(_buffer, _size),
     do: :erlang.nif_error(:undef)
 
   def deallocate_device_mem(_buffer),
@@ -292,6 +297,9 @@ defmodule EXLA.NIF do
     do: :erlang.nif_error(:undef)
 
   def transfer_from_outfeed(_client, _device, _shapes, _pid, _ref),
+    do: :erlang.nif_error(:undef)
+
+  def copy_buffer_to_device(_client, _buffer, _device),
     do: :erlang.nif_error(:undef)
 
   def start_log_sink(_sink_pid),

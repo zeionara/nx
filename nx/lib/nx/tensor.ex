@@ -25,7 +25,9 @@ defmodule Nx.Tensor do
   @type axis :: name | integer
   @type axes :: [axis]
   @type name :: atom
+
   @type t :: %Nx.Tensor{data: data, type: type, shape: shape, names: [name]}
+  @type t(data) :: %Nx.Tensor{data: data, type: type, shape: shape, names: [name]}
 
   @enforce_keys [:type, :shape, :names]
   defstruct [:data, :type, :shape, :names]
@@ -144,7 +146,7 @@ defmodule Nx.Tensor do
 
   @impl true
   def get_and_update(_tensor, _index, _update) do
-    raise "Access.get_and_update/3 is not yet supported by Nx.Tensor"
+    raise "Access.get_and_update/3 is not supported. Please use Nx.put_slice/3 instead"
   end
 
   @impl true
@@ -163,9 +165,14 @@ defmodule Nx.Tensor do
       data = tensor.data.__struct__.inspect(tensor, opts)
       inner = concat([line(), type, shape, line(), data])
 
-      color("#Nx.Tensor<", :map, opts)
-      |> concat(nest(inner, 2))
-      |> concat(color("\n>", :map, opts))
+      force_unfit(
+        concat([
+          color("#Nx.Tensor<", :map, opts),
+          nest(inner, 2),
+          line(),
+          color(">", :map, opts)
+        ])
+      )
     end
   end
 end

@@ -1,38 +1,48 @@
 defmodule EXLA.MixProject do
   use Mix.Project
 
-  @source_url "https://github.com/elixir-nx/exla"
-  @version "0.1.0-dev"
+  @source_url "https://github.com/elixir-nx/nx"
+  @version "0.4.0"
 
   def project do
     [
       app: :exla,
-      name: "EXLA",
       version: @version,
-      elixir: "~> 1.12-dev",
+      elixir: "~> 1.13",
       elixirc_paths: elixirc_paths(Mix.env()),
       deps: deps(),
       docs: docs(),
-      # We want to always trigger XLA compilation when XLA_BUILD is set,
-      # otherwise its Makefile will run only upon the initial compilation
-      compilers:
-        if(xla_build?(), do: [:xla], else: []) ++ [:exla, :elixir_make] ++ Mix.compilers(),
-      aliases: aliases()
+
+      # Package
+      name: "EXLA",
+      description: "Google's XLA (Accelerated Linear Algebra) compiler/backend for Nx",
+      package: package(),
+      preferred_cli_env: [
+        docs: :docs,
+        "hex.publish": :docs
+      ],
+      compilers: [:exla, :elixir_make] ++ Mix.compilers(),
+      aliases: [
+        "compile.exla": &compile/1
+      ],
+      make_env: %{
+        "MIX_BUILD_EMBEDDED" => "#{Mix.Project.config()[:build_embedded]}"
+      }
     ]
   end
 
-  # Run "mix help compile.app" to learn about applications.
   def application do
     [
       extra_applications: [:logger],
       mod: {EXLA.Application, []},
       env: [
         clients: [
-          host: [platform: :host],
           cuda: [platform: :cuda],
           rocm: [platform: :rocm],
-          tpu: [platform: :tpu]
-        ]
+          tpu: [platform: :tpu],
+          host: [platform: :host]
+        ],
+        preferred_clients: [:cuda, :rocm, :tpu, :host]
       ]
     ]
   end
@@ -40,29 +50,51 @@ defmodule EXLA.MixProject do
   defp elixirc_paths(:test), do: ~w(lib test/support)
   defp elixirc_paths(_), do: ~w(lib)
 
-  # Run "mix help deps" to learn about dependencies.
   defp deps do
     [
+      # {:nx, "~> 0.4.0"},
       {:nx, path: "../nx"},
-      {:xla, "~> 0.2.0", runtime: false},
+      {:telemetry, "~> 0.4.0 or ~> 1.0"},
+      {:xla, "~> 0.3.0", runtime: false},
       {:elixir_make, "~> 0.6", runtime: false},
       {:benchee, "~> 1.0", only: :dev},
-      {:ex_doc, "~> 0.23", only: :dev}
+      {:ex_doc, "~> 0.29.0", only: :docs}
     ]
   end
 
   defp docs do
     [
       main: "EXLA",
-      source_ref: "v#{@version}",
-      source_url: @source_url
+      source_url_pattern: "#{@source_url}/blob/v#{@version}/exla/%{path}#L%{line}",
+      extras: [
+        "guides/rotating-image.livemd",
+        "CHANGELOG.md"
+      ],
+      skip_undefined_reference_warnings_on: ["CHANGELOG.md"],
+      groups_for_modules: [
+        # EXLA,
+        # EXLA.Backend,
+
+        Bindings: [
+          EXLA.BinaryBuffer,
+          EXLA.Builder,
+          EXLA.Client,
+          EXLA.Computation,
+          EXLA.DeviceBuffer,
+          EXLA.Executable,
+          EXLA.Lib,
+          EXLA.Op,
+          EXLA.Shape
+        ]
+      ]
     ]
   end
 
-  defp aliases do
+  defp package do
     [
-      "compile.xla": "deps.compile xla",
-      "compile.exla": &compile/1
+      maintainers: ["Sean Moriarity", "José Valim"],
+      licenses: ["Apache-2.0"],
+      links: %{"GitHub" => @source_url}
     ]
   end
 
@@ -94,9 +126,5 @@ defmodule EXLA.MixProject do
     end
 
     {:ok, []}
-  end
-
-  defp xla_build?() do
-    System.get_env("XLA_BUILD") == "true"
   end
 end

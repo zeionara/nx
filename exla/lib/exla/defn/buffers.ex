@@ -2,12 +2,26 @@ defmodule EXLA.Defn.Buffers do
   @moduledoc false
 
   @doc """
-  binary + EXLA.Buffer + EXLA.BinaryBuffer -> Nx.
+  Filter inputs based on index.
   """
-  def to_nx!(buffers, outputs, fun \\ & &1) do
+  def filter_by_indexes(args, inputs), do: filter_by_indexes(args, 0, inputs)
+
+  defp filter_by_indexes([var | vars], i, [i | inputs]),
+    do: [var | filter_by_indexes(vars, i + 1, inputs)]
+
+  defp filter_by_indexes([_var | vars], i, inputs),
+    do: filter_by_indexes(vars, i + 1, inputs)
+
+  defp filter_by_indexes([], _i, []),
+    do: []
+
+  @doc """
+  binary + EXLA.DeviceBuffer + EXLA.BinaryBuffer -> Nx.
+  """
+  def to_nx!(buffers, outputs) do
     {res, []} =
       Nx.Defn.Composite.traverse(outputs, buffers, fn %Nx.Tensor{} = hole, [buffer | acc] ->
-        {fun.(%{hole | data: buffer_to_data(hole, buffer)}), acc}
+        {%{hole | data: buffer_to_data(hole, buffer)}, acc}
       end)
 
     res
@@ -22,9 +36,9 @@ defmodule EXLA.Defn.Buffers do
     %Nx.BinaryBackend{state: buffer}
   end
 
-  defp buffer_to_data(tensor, %EXLA.Buffer{shape: exla_shape} = buffer) do
+  defp buffer_to_data(tensor, %EXLA.DeviceBuffer{shape: exla_shape} = buffer) do
     validate_shape!(tensor, exla_shape)
-    %EXLA.DeviceBackend{buffer: buffer}
+    %EXLA.Backend{buffer: buffer}
   end
 
   defp buffer_to_data(tensor, %EXLA.BinaryBuffer{data: data, shape: exla_shape}) do
@@ -51,15 +65,22 @@ defmodule EXLA.Defn.Buffers do
   defp to_nx_type(type), do: type
 
   @doc """
-  Nx -> EXLA.Buffer + EXLA.BinaryBuffer.
+  Nx -> EXLA.DeviceBuffer + EXLA.BinaryBuffer.
   """
-  def from_nx!(tensors) do
-    for tensor <- tensors do
-      %Nx.Tensor{data: data} = tensor
+  def from_nx!(funs) do
+    for fun <- funs do
+      %Nx.Tensor{data: data} = tensor = fun.()
 
       case data do
-        %EXLA.DeviceBackend{buffer: buffer} -> buffer
-        _ -> EXLA.BinaryBuffer.from_binary(Nx.to_binary(tensor), to_exla_shape(tensor))
+        %EXLA.Backend{buffer: buffer} ->
+          buffer
+
+        %Nx.Defn.Expr{} ->
+          raise ArgumentError,
+                "cannot pass a tensor expression as argument to defn, got: #{inspect(tensor)}"
+
+        _ ->
+          EXLA.BinaryBuffer.from_binary(Nx.to_binary(tensor), to_exla_shape(tensor))
       end
     end
   end

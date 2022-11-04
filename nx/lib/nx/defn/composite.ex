@@ -3,10 +3,19 @@ defmodule Nx.Defn.Composite do
   Functions to deal with composite data types according to `Nx.Container`.
 
   The functions in this module can be used both inside and outside `defn`.
+  Note the functions in this module traverses tensors, but it does not
+  automatically convert values to tensors. For example, the tuple `{1, 2, 3}`
+  once traversed will emit the numbers `1`, `2`, and `3`. If desired,
+  you can invoke `Nx.to_tensor/1` to normalize them.
+
+  Note that, when a value is given to `defn`, it is first converted to
+  tensors and containers via `Nx.LazyContainer`. Inside `defn`, there are
+  no lazy containers, only containers.
   """
 
-  alias Nx.Defn.Expr
   alias Nx.Tensor, as: T
+
+  import Nx, only: [is_tensor: 1]
 
   @doc """
   Traverses two composite types to see if they are compatible.
@@ -15,7 +24,7 @@ defmodule Nx.Defn.Composite do
   compare numbers/tensors pairwise.
   """
   def compatible?(left, right, fun)
-      when (is_number(left) or is_struct(left, T)) and (is_number(right) or is_struct(right, T)),
+      when is_tensor(left) and is_tensor(right),
       do: fun.(left, right)
 
   def compatible?(left, right, fun) when tuple_size(left) == tuple_size(right) do
@@ -25,8 +34,25 @@ defmodule Nx.Defn.Composite do
   end
 
   def compatible?(%mod{} = left, %mod{} = right, fun) do
-    left = Nx.Container.reduce(left, [], &[&1 | &2])
-    right = Nx.Container.reduce(right, [], &[&1 | &2])
+    # LazyContainer is fully recursive but we don't want to go full recursive
+    # unless we have to, so we can also compare structures along the way.
+    {left, right} =
+      case Nx.LazyContainer.impl_for(left) do
+        Nx.LazyContainer.Any ->
+          left = Nx.Container.reduce(left, [], &[&1 | &2])
+          right = Nx.Container.reduce(right, [], &[&1 | &2])
+          {left, right}
+
+        impl ->
+          {_, left} =
+            impl.traverse(left, [], fn template, _fun, acc -> {template, [template | acc]} end)
+
+          {_, right} =
+            impl.traverse(right, [], fn template, _fun, acc -> {template, [template | acc]} end)
+
+          {left, right}
+      end
+
     Enum.zip(left, right) |> Enum.all?(fn {l, r} -> compatible?(l, r, fun) end)
   end
 
@@ -54,21 +80,22 @@ defmodule Nx.Defn.Composite do
       1
       iex> Nx.Defn.Composite.count({1, {2, 3}})
       3
+      iex> Nx.Defn.Composite.count({Complex.new(1), {Nx.tensor(2), 3}})
+      3
 
   """
   def count(tree), do: count(tree, 0)
-  defp count(%T{}, acc), do: acc + 1
-  defp count(number, acc) when is_number(number), do: acc + 1
+  defp count(tensor, acc) when is_tensor(tensor), do: acc + 1
   defp count(container, acc), do: Nx.Container.reduce(container, acc, &count/2)
 
   @doc """
-  Traverses the given composite types with `fun`.
+  Traverses recursively the given composite types with `fun`.
 
-  If composite tensor expressions are given, such as a tuple,
-  the composite type is recursively traversed and returned.
+  If a composite tensor is given, such as a tuple, the composite
+  type is recursively traversed and returned.
 
-  If a non-composite tensor expression is given, the function
-  is invoked for it but not for its arguments.
+  Otherwise the function is invoked with the tensor (be it a
+  number, complex, or actual tensor).
   """
   def traverse(expr, fun) when is_function(fun, 1) do
     {result, []} = traverse(expr, [], fn expr, [] -> {fun.(expr), []} end)
@@ -76,25 +103,22 @@ defmodule Nx.Defn.Composite do
   end
 
   @doc """
-  Traverses the given composite types with `acc` and `fun`.
+  Traverses recursively the given composite types with `acc` and `fun`.
 
-  If composite tensor expressions are given, such as a tuple,
-  the composite type is recursively traversed and returned.
+  If a composite tensor is given, such as a tuple, the composite
+  type is recursively traversed and returned.
 
-  If a non-composite tensor expression is given, the function
-  is invoked for it but not for its arguments.
+  Otherwise the function is invoked with the tensor (be it a
+  number, complex, or actual tensor).
   """
-  def traverse(%T{} = expr, acc, fun) when is_function(fun, 2),
+  def traverse(expr, acc, fun) when (is_tensor(expr) or is_boolean(expr)) and is_function(fun, 2),
     do: fun.(expr, acc)
-
-  def traverse(number, acc, fun) when is_number(number) and is_function(fun, 2),
-    do: fun.(number, acc)
 
   def traverse(container, acc, fun),
     do: Nx.Container.traverse(container, acc, &traverse(&1, &2, fun))
 
   @doc """
-  Reduces the given composite types with `acc` and `fun`.
+  Reduces recursively the given composite types with `acc` and `fun`.
 
   If composite tensor expressions are given, such as a tuple,
   the composite type is recursively traversed and returned.
@@ -102,19 +126,16 @@ defmodule Nx.Defn.Composite do
   If a non-composite tensor expression is given, the function
   is invoked for it but not for its arguments.
   """
-  def reduce(%T{} = expr, acc, fun) when is_function(fun, 2),
+  def reduce(expr, acc, fun) when is_tensor(expr) and is_function(fun, 2),
     do: fun.(expr, acc)
-
-  def reduce(number, acc, fun) when is_number(number) and is_function(fun, 2),
-    do: fun.(number, acc)
 
   def reduce(container, acc, fun),
     do: Nx.Container.reduce(container, acc, &reduce(&1, &2, fun))
 
   @doc """
-  Flattens the given list of composite types.
+  Flattens recursively the given list of composite types.
 
-  Elements that are not tensors (i.e. numbers) are kept as is
+  Elements that are not tensors (i.e. numbers and `Complex` numbers) are kept as is
   unless a custom function is given.
 
   ## Examples
@@ -125,67 +146,20 @@ defmodule Nx.Defn.Composite do
       iex> Nx.Defn.Composite.flatten_list([1, {2, 3}], [Nx.tensor(4)])
       [1, 2, 3, Nx.tensor(4)]
 
-      iex> Nx.Defn.Composite.flatten_list([1, {2, 3}], [Nx.tensor(4)], &Nx.tensor/1)
-      [Nx.tensor(1), Nx.tensor(2), Nx.tensor(3), Nx.tensor(4)]
-
   """
-  def flatten_list(args, tail \\ [], fun \\ & &1) when is_list(args) do
+  def flatten_list(args, tail \\ []) when is_list(args) do
     args
-    |> Enum.reduce([], &flatten_each(&1, &2, fun))
+    |> Enum.reduce([], &flatten_each/2)
     |> Enum.reverse(tail)
   end
 
-  defp flatten_each(%T{} = tensor, acc, _fun),
+  defp flatten_each(%T{} = tensor, acc),
     do: [tensor | acc]
 
-  defp flatten_each(number, acc, fun) when is_number(number),
-    do: [fun.(number) | acc]
+  defp flatten_each(number, acc)
+       when is_number(number) or is_struct(number, Complex),
+       do: [number | acc]
 
-  defp flatten_each(container, acc, fun),
-    do: Nx.Container.reduce(container, acc, &flatten_each(&1, &2, fun))
-
-  ## Nx.Defn callbacks
-
-  @doc false
-  def from_compile_args(args, cache) do
-    from_compile_args(args, cache, [])
-  end
-
-  defp from_compile_args([arg | args], cache, vars) when is_function(arg) do
-    from_compile_args(args, [arg | cache], vars)
-  end
-
-  defp from_compile_args([arg | args], cache, vars) do
-    from_compile_args(args, cache, [arg | vars])
-  end
-
-  defp from_compile_args([], cache, vars), do: {cache, Enum.reverse(vars)}
-
-  @doc false
-  def from_runtime_args(args, tail) do
-    flatten_list(args, tail, &Nx.to_tensor/1)
-  end
-
-  @doc false
-  def to_result(container) do
-    traverse(container, &Expr.tensor/1)
-  end
-
-  @doc false
-  def args_to_params(args, params) do
-    {args, {[], _}} =
-      Enum.map_reduce(args, {params, 0}, fn
-        arg, acc
-        when is_function(arg)
-        when is_tuple(arg) and is_function(elem(arg, 0)) ->
-          {arg, acc}
-
-        arg, acc ->
-          traverse(arg, acc, fn _, {[param | params], i} ->
-            {Expr.parameter(param, :root, i), {params, i + 1}}
-          end)
-      end)
-
-    args
-  end
+  defp flatten_each(container, acc),
+    do: Nx.Container.reduce(container, acc, &flatten_each/2)
 end

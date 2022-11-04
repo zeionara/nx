@@ -18,7 +18,7 @@ defmodule MNIST do
     batch
     |> Nx.dot(w1)
     |> Nx.add(b1)
-    |> Nx.logistic()
+    |> Nx.sigmoid()
     |> Nx.dot(w2)
     |> Nx.add(b2)
     |> softmax()
@@ -59,7 +59,7 @@ defmodule MNIST do
   end
 
   defp unzip_cache_or_download(zip) do
-    base_url = 'https://storage.googleapis.com/cvdf-datasets/mnist/'
+    base_url = ~c"https://storage.googleapis.com/cvdf-datasets/mnist/"
     path = Path.join("tmp", zip)
 
     data =
@@ -90,7 +90,7 @@ defmodule MNIST do
       |> Nx.from_binary({:u, 8})
       |> Nx.reshape({n_images, n_rows * n_cols}, names: [:batch, :input])
       |> Nx.divide(255)
-      |> Nx.to_batched_list(30)
+      |> Nx.to_batched(30)
 
     IO.puts("#{n_images} #{n_rows}x#{n_cols} images\n")
 
@@ -102,7 +102,7 @@ defmodule MNIST do
       |> Nx.reshape({n_labels, 1}, names: [:batch, :output])
       |> Nx.equal(Nx.tensor(Enum.to_list(0..9)))
       |> Nx.as_type({:s, 8})
-      |> Nx.to_batched_list(30)
+      |> Nx.to_batched(30)
 
     IO.puts("#{n_labels} labels\n")
 
@@ -113,7 +113,7 @@ defmodule MNIST do
     total_batches = Enum.count(imgs)
 
     imgs
-    |> Enum.zip(labels)
+    |> Stream.zip(labels)
     |> Enum.reduce({cur_params, Nx.tensor(0.0), Nx.tensor(0.0)}, fn
       {imgs, tar}, {cur_params, avg_loss, avg_accuracy} ->
         update_with_averages(cur_params, imgs, tar, avg_loss, avg_accuracy, total_batches)
@@ -131,12 +131,12 @@ defmodule MNIST do
         epoch_avg_loss =
           epoch_avg_loss
           |> Nx.backend_transfer()
-          |> Nx.to_scalar()
+          |> Nx.to_number()
 
         epoch_avg_acc =
           epoch_avg_acc
           |> Nx.backend_transfer()
-          |> Nx.to_scalar()
+          |> Nx.to_number()
 
         IO.puts("Epoch #{epoch} Time: #{time / 1_000_000}s")
         IO.puts("Epoch #{epoch} average loss: #{inspect(epoch_avg_loss)}")
@@ -150,7 +150,7 @@ end
 Nx.default_backend(Torchx.Backend)
 
 {train_images, train_labels} =
-  MNIST.download('train-images-idx3-ubyte.gz', 'train-labels-idx1-ubyte.gz')
+  MNIST.download(~c"train-images-idx3-ubyte.gz", ~c"train-labels-idx1-ubyte.gz")
 
 IO.puts("Initializing parameters...\n")
 params = MNIST.init_random_params()

@@ -63,14 +63,16 @@ defmodule Nx.Defn do
   ## JIT compilers
 
   The power of `Nx.Defn` is given by its compilers. The default
-  compiler is `Nx.Defn.Evaluator`, which executes the code in
-  pure Elixir. You can use `jit/3` to compile a function on the
-  fly using a different compiler, such as `EXLA`:
+  compiler is `Nx.Defn.Evaluator`, which evalutes the code.
+  You can use `jit/3` to compile a function on the fly using a
+  different compiler, such as `EXLA`:
 
-      Nx.Defn.jit(&MyModule.softmax/1, [my_tensor], compiler: EXLA)
+      fun = Nx.Defn.jit(&MyModule.softmax/1, compiler: EXLA)
+      fun.(my_tensor)
 
-  The above will optimize, compile, and run `softmax` on the fly
-  to the CPU (or the GPU) if available.
+  The above will return an anonymous function that optimizes,
+  compiles, and run `softmax` on the fly on the CPU (or the GPU)
+  if available.
 
   You can also change the default compiler for all numerical
   definitions (`defn`) by setting the default options. This can
@@ -79,8 +81,13 @@ defmodule Nx.Defn do
       config :nx, :default_defn_options, compiler: EXLA
 
   Now calling `MyModule.softmax(my_tensor)` will use `EXLA` even
-  without wrapping it in `jit/3`. For scripts, you may also call
-  `Nx.Defn.global_default_options(compiler: EXLA)`.
+  without wrapping it in `jit/2`.
+
+  However, note that compilation may be quite time consuming on
+  the first invocation, that's why it is often preferred to use
+  the `compiler: EXLA` option when calling the functions in this
+  module instead. EXLA, in particular, also exports a `EXLA.jit/2`
+  function for convenience.
 
   `defn` functions are compiled when they are invoked, based on
   the type and shapes of the tensors given as arguments. The
@@ -94,17 +101,41 @@ defmodule Nx.Defn do
 
   Inside `defn` you can only call other `defn` functions and
   the functions in the `Nx` module. However, it is possible
-  to use transforms to invoke any Elixir code:
+  to use transforms, defined with either `deftransform` or
+  `deftransformp` to invoke any Elixir code.
+
+  You can call code which was defined with `deftransform` from another module:
+
+      defmodule MyRemoteModule do
+        import Nx.Defn
+
+        deftransform remote_elixir_code(value) do
+          IO.inspect(value)
+        end
+      end
 
       defn add_and_mult(a, b, c) do
         res = a * b + c
-        transform(res, &IO.inspect/1)
+        MyRemoteModule.remote_elixir_code(res)
       end
 
-  For example, the code above invokes `&IO.inspect/1`, which is
+  You can also define and call a private transform defined through `deftransformp`:
+
+      defn add_and_mult(a, b, c) do
+        res = a * b + c
+        custom_elixir_code(res)
+      end
+
+      deftransformp custom_elixir_code(value), do: IO.inspect(value)
+
+  For example, the two code snippets invoke `IO.inspect/1`, which is
   not a `defn` function, with the value of `res`. This is useful
   as it allows developers to transform `defn` code to optimize,
   add new properties, and so on.
+
+  The only difference between using `deftransform` and `deftransformp` is
+  wether you want to expose and share the code with other modules, just
+  like `def` and `defp`.
 
   Transforms can also be used to manipulate Elixir data structures,
   such as options. `defn` expects all inputs to be tensors, with the
@@ -117,23 +148,30 @@ defmodule Nx.Defn do
 
       defn sum_axis(t, opts \\ []) do
         opts = keyword!(opts, [:axis])
-        axis = transform(opts, &Keyword.fetch!(opts, :axis))
+        axis = get_axis(opts)
         Nx.sum(t, axes: [axis])
       end
+
+      deftransformp get_axis(opts), do: Keyword.fetch!(opts, :axis)
 
   ## Inputs and outputs types
 
   `Nx` and `defn` expect the arguments to be numbers, tensors,
-  or one of the following composite data types:
+  or one composite data type that implements `Nx.LazyContainer`.
+  Tuples and maps implement `Nx.LazyContainer` by default.
+  As previously described, `defn` are cached based on the shape,
+  type, and names of the input tensors, but not their values.
 
-    1. tuples of numbers/tensors
-    2. maps of any key with numbers/tensors as values
-    3. any struct that implements `Nx.Container`
+  `defn` also accepts two special arguments: functions (or tuples
+  of functions) and lists (most commonly as keyword lists). Those
+  values are passed as is to numerical definitions and cached as
+  a whole. For this reason, you must never capture tensors in
+  functions or pass tensors in keyword lists.
 
   When numbers are given as arguments, they are always immediately
   converted to tensors on invocation. If you want to keep numbers
   as is or if you want to pass any other value to numerical definitions,
-  they must be given as default arguments (see next subsection).
+  they must be given as keyword lists.
 
   ### Default arguments
 
@@ -155,14 +193,11 @@ defmodule Nx.Defn do
   you have to use transforms, as described in the "Invoking custom Elixir
   code" section.
 
-  Additionally, `defn` supports anonymous as a direct input, without wrapping
-  in a default argument.
-
   > **Important!** When it comes to JIT compilation, each different set of
-  > options and anonymous functions will lead to a different compilation of
-  > the numerical function.
+  > options (as well as anonymous functions) will lead to a different
+  > compilation of the numerical function.
   >
-  > Furthermore, if tensors are given through default arguments, they won't
+  > Furthermore, if tensors are given through keyword lists, they won't
   > be cached effectively. Tensors in `defn` are cached based on their shape
   > and type, not their value, but this is not true if the tensor is given
   > via a default argument or captured by an anonymous function. For this
@@ -179,8 +214,8 @@ defmodule Nx.Defn do
         %{map | a: Nx.add(map.a, 1)}
       end
 
-  The following code increments the value under the key `:a` by
-  1. However, because the function receives the whole map and
+  The following code increments the value under the key `:a`
+  by 1. However, because the function receives the whole map and
   returns the whole map, it means if the map has 120 keys, the
   whole map will be copied to the CPU/GPU, and then brought back.
 
@@ -252,41 +287,163 @@ defmodule Nx.Defn do
   end
 
   @doc """
-  Invokes the anonymous function with just-in-time compilation.
+  Compiles the given anonymous function with the given tensor shapes.
 
-  The anonymous function will be invoked with tensor expressions
-  which are JIT compiled and then invoked. For example, take the
-  following definition:
+  While `jit/2` compiles a function just-in time based on the
+  input shapes, this function precompiles the given anonymous
+  function based on the input shapes. This can be beneficial for
+  large numerical definitions, where the cache mechanism in `jit/2`
+  may take miliseconds.
+
+  For example, take the following definition:
 
       defn softmax(t), do: Nx.exp(t) / Nx.sum(Nx.exp(t))
 
+  You can jit and then apply it as:
+
+      fun = Nx.Defn.compile(&softmax/1, [Nx.template({3}, {:s, 64})], compiler: EXLA)
+      fun.(Nx.tensor([1, 2, 3]))
+
+  You can also pass a mixture of templates and options when
+  compiling a function. In such cases, you must only pass
+  the inputs when invoking the compiled function, as the options
+  will already be embedded in its compiled value:
+
+      fun = Nx.Defn.compile(&Nx.sum/2, [Nx.template({2, 2}, {:s, 64}), [axes: [1]]])
+      fun.(Nx.iota({2, 2}))
+
+  If the input tensors do not match the shape of the tensors
+  given on compilation, it will raise.
+
   ## Options
+
+    * `:compiler` - the compiler for the JIT compilation
 
     * `:hooks` - a map of hooks to execute. See `Nx.Defn.Kernel.hook/3`
 
   """
-  def jit(fun, args, opts \\ [])
-      when is_function(fun) and is_list(args) and is_list(opts) do
-    if Nx.Defn.Compiler.current() do
-      raise "cannot call Nx.Defn.jit/3 when there is already a JIT compilation happening"
-    end
-
+  def compile(fun, template_args, opts \\ [])
+      when is_function(fun) and is_list(template_args) and is_list(opts) do
+    {fun, params, _flatten} = Nx.Defn.Compiler.to_lazy_params(fun, template_args)
     opts = prepare_options(opts)
-    Nx.Defn.Compiler.__jit__(fun, args, opts)
+    compiled_fun = Nx.Defn.Compiler.__compile__(fun, params, opts)
+
+    wrap(fun, fn args ->
+      if Nx.Defn.Compiler.current() do
+        raise "cannot invoke compiled function when there is a JIT compilation happening"
+      end
+
+      {templates, flatten} = Nx.Defn.Compiler.to_lazy_template(args)
+      assert_compatible!(templates, params, 1)
+      [res] = compiled_fun.([flatten])
+      res
+    end)
+  end
+
+  defp assert_compatible!([arg | args], [template | templates], pos) do
+    if Nx.compatible?(arg, template) do
+      assert_compatible!(args, templates, pos + 1)
+    else
+      raise ArgumentError, """
+      argument at position #{pos} is not compatible with compiled function template.
+
+      Template:
+
+      #{inspect(template)}
+
+      Argument:
+
+      #{inspect(arg)}
+
+      """
+    end
+  end
+
+  defp assert_compatible!([], [], _pos), do: :ok
+
+  @doc """
+  Wraps an anonymous function with just-in-time compilation.
+
+  Once invoked, the wrapped anonymous function will perform just
+  in time compilation with the configured compiler. For example,
+  take the following definition:
+
+      defn softmax(t), do: Nx.exp(t) / Nx.sum(Nx.exp(t))
+
+  You can jit and then apply it as:
+
+      fun = Nx.Defn.jit(&softmax/1, compiler: EXLA)
+      fun.(Nx.tensor([1, 2, 3]))
+
+  ## Options
+
+    * `:compiler` - the compiler for the JIT compilation
+
+    * `:hooks` - a map of hooks to execute. See `Nx.Defn.Kernel.hook/3`
+
+    * `:on_conflict` - what to do if a JIT compilation is already in place.
+      It may be `:raise` (the default), `:force` (forces a new JIT compilation),
+      or `:reuse` (reuses the exiting JIT compilation). It is not recommended
+      to set the `:compiler` option when reusing.
+
+  """
+  def jit(fun, opts \\ []) when is_function(fun) and is_list(opts) do
+    if Keyword.keyword?(opts) do
+      wrap(fun, &jit_apply(fun, &1, opts))
+    else
+      IO.warn("jit/3 is deprecated, use jit/2 instead")
+      jit_apply(fun, opts, [])
+    end
+  end
+
+  @deprecated "Use jit/2 instead"
+  def jit(fun, args, opts) when is_function(fun) and is_list(args) and is_list(opts) do
+    jit_apply(fun, args, opts)
   end
 
   @doc """
-  JITs the given function if outside of `defn`, otherwise invokes it.
+  Invokes the anonymous function with just-in-time compilation.
 
-  It is not possible to invoke `jit/3` inside `defn`, as all code inside
-  `defn` is already jitted. However, some libraries may want to provide
-  abstractions that can be invoked either inside `defn` or outside.
-  In such cases, `jit_or_apply/3` can be used to start jitting
-  if it has been invoked outside of a numerical definition.
+  This function is equivalent to calling `jit/2` and then applying
+  the given arguments to the anonymous function.
 
-  The `opts` are the same as the ones given to `jit/3` and they are only
-  used if invoking this function outside of `defn`.
+  For example, take the following definition:
+
+      defn softmax(t), do: Nx.exp(t) / Nx.sum(Nx.exp(t))
+
+  You can `jit_apply/3` it as:
+
+      Nx.Defn.jit_apply(&softmax/1, [Nx.tensor([1, 2, 3])], compiler: EXLA)
+
+  It accepts the same options as `jit/2`.
   """
+  def jit_apply(fun, args, opts \\ [])
+      when is_function(fun) and is_list(args) and is_list(opts) do
+    {on_conflict, opts} = Keyword.pop(opts, :on_conflict, :raise)
+
+    cond do
+      Nx.Defn.Compiler.current() == nil ->
+        do_jit_apply(fun, args, opts)
+
+      on_conflict == :raise ->
+        raise "cannot invoke JITed function when there is a JIT compilation happening"
+
+      on_conflict == :force ->
+        do_jit_apply(fun, args, opts)
+
+      on_conflict == :reuse ->
+        apply(fun, args)
+    end
+  end
+
+  defp do_jit_apply(fun, args, opts) do
+    opts = prepare_options(opts)
+    {fun, params, flatten} = Nx.Defn.Compiler.to_lazy_params(fun, args)
+    [res] = Nx.Defn.Compiler.__jit__(fun, params, [flatten], opts)
+    res
+  end
+
+  @deprecated "Use jit/2 or jit_apply/3 with the :on_conflict option"
   def jit_or_apply(fun, args, opts \\ [])
       when is_function(fun) and is_list(args) and is_list(opts) do
     if Nx.Defn.Compiler.current() do
@@ -294,6 +451,38 @@ defmodule Nx.Defn do
     else
       jit(fun, args, opts)
     end
+  end
+
+  @doc """
+  Wraps an anonymous function to return its underlying defn expression.
+
+  > #### Warning {: .warning}
+  >
+  > This function must be invoked for debugging purposes only.
+
+  ## Options
+
+    * `:hooks` - a map of hooks to execute. See `Nx.Defn.Kernel.hook/3`
+
+  """
+  def debug_expr(fun, opts \\ []) when is_function(fun) and is_list(opts) do
+    wrap(fun, &debug_expr_apply(fun, &1, opts))
+  end
+
+  @doc """
+  Invokes the anonymous function to return its underlying defn expression.
+
+  > #### Warning {: .warning}
+  >
+  > This function must be invoked for debugging purposes only.
+
+  It accepts the same options as `debug_expr/2`.
+  """
+  def debug_expr_apply(fun, args, opts \\ []) when is_function(fun) and is_list(args) do
+    opts = opts |> prepare_options() |> Keyword.put(:compiler, Nx.Defn.Debug)
+    {fun, params, flatten} = Nx.Defn.Compiler.to_lazy_params(fun, args)
+    [res] = Nx.Defn.Compiler.__jit__(fun, params, [flatten], opts)
+    res
   end
 
   @doc """
@@ -353,14 +542,17 @@ defmodule Nx.Defn do
   def stream(fun, args, opts \\ [])
       when is_function(fun) and is_list(args) and is_list(opts) do
     if Nx.Defn.Compiler.current() do
-      raise "cannot call Nx.Defn.stream/3 when there is already a JIT compilation happening"
+      raise "cannot call Nx.Defn.stream/3 when there is a JIT compilation happening"
     end
 
+    opts = prepare_options(opts)
+    {fun, params, flatten} = Nx.Defn.Compiler.to_lazy_params(fun, args)
+
     case args do
-      [input, acc | args] ->
+      [_input, acc | _] ->
         acc = Nx.Defn.Composite.traverse(acc, &Nx.to_tensor/1)
-        opts = prepare_options(opts)
-        Nx.Defn.Compiler.__stream__(fun, Nx.to_template(input), acc, args, opts)
+        [stream] = Nx.Defn.Compiler.__stream__(fun, hd(params), acc, params, [flatten], opts)
+        stream
 
       _ ->
         raise ArgumentError, "Nx.Defn.stream/3 expects at least two arguments"
@@ -377,12 +569,14 @@ defmodule Nx.Defn do
     opts
   end
 
+  defp wrap(fun, callback) do
+    {:arity, arity} = Function.info(fun, :arity)
+    Nx.Defn.Compiler.fun(arity, callback)
+  end
+
   @doc """
   Receives an anonymous function and returns a new anonymous function
   that returns the gradient of the input function when invoked.
-
-  This function is typically used to compute the gradient outside of
-  `defn`. To compute them inside `defn`, prefer `grad/2` instead.
 
   ## Examples
 
@@ -395,15 +589,15 @@ defmodule Nx.Defn do
 
   """
   def grad(fun) when is_function(fun, 1) do
-    fn t -> jit_or_apply(fn t -> grad(t, fun) end, [t]) end
+    fn t -> grad(t, fun) end
   end
 
   @doc """
   Computes the gradient of the given `var` on `fun`.
 
-  This is typically used inside `defn`. The result of the `grad`
-  function must be a scalar tensor. If a non-scalar tensor is given,
-  it is assumed the additional dimensions are batch dimensions.
+  The result of the `grad` function must be a scalar tensor.
+  If a non-scalar tensor is given, it is assumed the additional
+  dimensions are batch dimensions.
 
   ### Examples
 
@@ -417,20 +611,23 @@ defmodule Nx.Defn do
         grad({a, b}, fn {a, b} -> Nx.tanh(a) + Nx.power(b, 2) end)
       end
 
-  When a tuple is given, a tuple will be returned.
+  `var_or_vars` can be any `Nx.Container` with one or multiple
+  tensors.
   """
   def grad(var_or_vars, fun) when is_function(fun, 1) do
-    {_value, grad} = Nx.Defn.Grad.transform(var_or_vars, fun, & &1)
-    grad
+    jit_apply(
+      fn var_or_vars ->
+        {_value, grad} = Nx.Defn.Grad.transform(var_or_vars, fun, & &1)
+        grad
+      end,
+      [var_or_vars],
+      on_conflict: :reuse
+    )
   end
 
   @doc """
   Receives an anonymous function and returns a new anonymous function
   that returns the value and gradient of the input function when invoked.
-
-  This function is typically used to compute the value and gradient
-  outside of `defn`. To compute them inside `defn`, prefer
-  `value_and_grad/2` instead.
 
   ## Examples
 
@@ -449,15 +646,14 @@ defmodule Nx.Defn do
 
   """
   def value_and_grad(fun) when is_function(fun, 1) do
-    fn t -> jit_or_apply(fn t -> value_and_grad(t, fun) end, [t]) end
+    fn t -> value_and_grad(t, fun) end
   end
 
   @doc """
   Computes the value and gradient of the given `var` on `fun`
   with an optional data transformation.
 
-  This is typically used inside `defn`. It returns a tuple with
-  the value and the gradient.
+  It returns a tuple with the value and the gradient.
 
   ### Examples
 
@@ -471,7 +667,8 @@ defmodule Nx.Defn do
         value_and_grad({a, b}, fn {a, b} -> Nx.tanh(a) + Nx.power(b, 2) end)
       end
 
-  When a tuple is given, a tuple will be returned.
+  `var_or_vars` can be any `Nx.Container` with one or multiple
+  tensors.
 
   `transform` allows you to transform the expression before the gradient is
   calculated. This enables optimizations that reuse parts of expressions. As
@@ -493,14 +690,18 @@ defmodule Nx.Defn do
   """
   def value_and_grad(var_or_vars, fun, transform \\ & &1)
       when Kernel.and(is_function(fun, 1), is_function(transform, 1)) do
-    Nx.Defn.Grad.transform(var_or_vars, fun, transform)
+    jit_apply(
+      fn var_or_vars -> Nx.Defn.Grad.transform(var_or_vars, fun, transform) end,
+      [var_or_vars],
+      on_conflict: :reuse
+    )
   end
 
   @doc """
   Defines a public numerical function.
   """
   defmacro defn(call, do: block) do
-    define(:def, call, block, __CALLER__)
+    define_defn(:def, call, block, __CALLER__)
   end
 
   @doc """
@@ -511,12 +712,87 @@ defmodule Nx.Defn do
   all local function calls within `defn`.
   """
   defmacro defnp(call, do: block) do
-    define(:defp, call, block, __CALLER__)
+    define_defn(:defp, call, block, __CALLER__)
+  end
+
+  @doc """
+  Can be used to define bodiless clauses for multi-clause transforms.
+
+  See also: `deftransform/2`
+
+  ## Examples
+
+      deftransform foo(bar, baz \\ 1)
+      deftransform foo(bar, 1), do: bar
+      deftransform foo(bar, baz), do: bar + baz
+  """
+  defmacro deftransform(call) do
+    define_transform(:def, call, nil, __CALLER__)
+  end
+
+  @doc """
+  Defines a transform that executes the given `fun` with `arg`
+  when building `defn` expressions.
+
+  ## Example
+
+  Take the following defn expression:
+
+      defn tanh_power(a, b) do
+        Nx.tanh(a) + Nx.power(b, 2)
+      end
+
+  Let's see a trivial example, which is to use `IO.inspect/1` to
+  print a tensor expression at definition time:
+
+      defn tanh_power(a, b) do
+        Nx.tanh(a) + Nx.power(b, 2) |> my_inspect()
+      end
+
+      deftransformp my_inspect(expr), do: IO.inspect(expr)
+
+  Or:
+
+      defn tanh_power(a, b) do
+        res = Nx.tanh(a) + Nx.power(b, 2)
+        my_inspect(res)
+        res
+      end
+
+  When invoked in both cases, it will print the expression being built
+  by `defn`:
+
+      #Nx.Defn.Expr<
+        parameter a
+        parameter c
+        b = tanh [ a ] ()
+        d = power [ c, 2 ] ()
+        e = add [ b, d ] ()
+      >
+
+  Although, for convenience, you might use `print_expr/2` instead.
+  """
+  defmacro deftransform(call, do: block) do
+    define_transform(:def, call, block, __CALLER__)
+  end
+
+  @doc """
+  Private function version for `deftransform/1`
+  """
+  defmacro deftransformp(call) do
+    define_transform(:defp, call, nil, __CALLER__)
+  end
+
+  @doc """
+  Private function version for `deftransform/2`
+  """
+  defmacro deftransformp(call, do: block) do
+    define_transform(:defp, call, block, __CALLER__)
   end
 
   ## Callbacks
 
-  defp define(kind, call, block, env) do
+  defp define_defn(kind, call, block, env) do
     assert_no_guards!(kind, call, env)
     # Note name here is not necessarily an atom due to unquote(name) support
     {name, args} = decompose_call!(kind, call, env)
@@ -524,7 +800,7 @@ defmodule Nx.Defn do
 
     defaults =
       for {{:\\, meta, [_, default]}, i} <- Enum.with_index(args),
-          do: {i, {meta, default}},
+          do: {i, {meta, Macro.escape(default)}},
           into: []
 
     quote do
@@ -533,6 +809,7 @@ defmodule Nx.Defn do
         unquote(kind),
         unquote(name),
         unquote(arity),
+        :numerical,
         %{unquote_splicing(defaults)}
       )
 
@@ -542,6 +819,45 @@ defmodule Nx.Defn do
       end
     end
   end
+
+  defp define_transform(kind, call, block, env) do
+    # Note name here is not necessarily an atom due to unquote(name) support
+    {name, args} = decompose_call!(kind, call, env)
+    arity = length(args)
+
+    defaults =
+      for {{:\\, meta, [_, default]}, i} <- Enum.with_index(args),
+          do: {i, {meta, Macro.escape(default)}},
+          into: []
+
+    define_ast =
+      quote do
+        unquote(__MODULE__).__define__(
+          __MODULE__,
+          unquote(kind),
+          unquote(name),
+          unquote(arity),
+          :transform,
+          %{unquote_splicing(defaults)}
+        )
+      end
+
+    def_ast =
+      if block do
+        quote do
+          Kernel.unquote(kind)(unquote(call), do: unquote(block))
+        end
+      else
+        quote do
+          Kernel.unquote(kind)(unquote(call))
+        end
+      end
+
+    {:__block__, [], [define_ast, def_ast]}
+  end
+
+  defp decompose_call!(kind, {:when, _, [call, _guards]}, env),
+    do: decompose_call!(kind, call, env)
 
   defp decompose_call!(_kind, {{:unquote, _, [name]}, _, args}, _env) do
     {name, args}
@@ -567,20 +883,40 @@ defmodule Nx.Defn do
   defp assert_no_guards!(_kind, _call, _env), do: :ok
 
   # Internal attributes
-  @exports_key :__defn_exports__
+  @defn_exports_key :__defn_exports__
 
   @doc false
-  def __define__(module, kind, name, arity, defaults) do
+  def __define__(module, kind, name, arity, type, defaults) do
     exports =
-      if exports = Module.get_attribute(module, @exports_key) do
+      if exports = Module.get_attribute(module, @defn_exports_key) do
         exports
       else
         Module.put_attribute(module, :before_compile, __MODULE__)
         %{}
       end
 
-    exports = Map.put(exports, {name, arity}, %{kind: kind, defaults: defaults})
-    Module.put_attribute(module, @exports_key, exports)
+    current_export = %{
+      type: type,
+      kind: kind,
+      defaults: defaults
+    }
+
+    exports =
+      if type == :transform do
+        # This will ensure that we capture the defaults for a bodiless head
+        # while keeping the definitions properly for the same arity
+        Map.update(exports, {name, arity}, current_export, fn item ->
+          %{
+            type: item.type || current_export.type,
+            kind: item.kind || current_export.kind,
+            defaults: if(item.defaults == [], do: current_export.defaults, else: item.defaults)
+          }
+        end)
+      else
+        Map.put(exports, {name, arity}, current_export)
+      end
+
+    Module.put_attribute(module, @defn_exports_key, exports)
     :ok
   end
 
@@ -590,7 +926,7 @@ defmodule Nx.Defn do
 
   @doc false
   defmacro __before_compile__(env) do
-    exports = Module.get_attribute(env.module, @exports_key)
-    Nx.Defn.Compiler.__compile__(env, exports)
+    defn_exports = Module.get_attribute(env.module, @defn_exports_key)
+    Nx.Defn.Compiler.__compile__(env, defn_exports)
   end
 end

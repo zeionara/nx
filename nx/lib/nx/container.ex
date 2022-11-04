@@ -38,22 +38,35 @@ defprotocol Nx.Container do
   @fallback_to_any true
 
   @doc """
-  Traverse receives a data structure with `acc` and `fun`.
+  Traverses non-recursively tensors in a data structure with `acc` and `fun`.
 
-  The function receives a tensor and the accumulator for each
-  tensor in the container. It returns a two element tuple
-  with the updated container and the accumulator.
+  `fun` is invoked with each tensor or tensor container in the
+  data structure plus an accumulator. It must return a two element
+  tuple with the updated value and accumulator.
+
+  This function returns the updated container and the accumulator.
+
+  Given `fun` may receive containers, it is not recursive by default.
+  See `Nx.Defn.Composite.traverse/3` for a recursive variant.
   """
-  @spec traverse(t(), acc, (Nx.Tensor.t(), acc -> {term(), acc})) :: acc when acc: term()
+  @spec traverse(t(), acc, (Nx.t() | Nx.Container.t(), acc -> {Nx.t() | Nx.Container.t(), acc})) ::
+          acc
+        when acc: term()
   def traverse(data, acc, fun)
 
   @doc """
-  Reduces a data structure with `acc` and `fun`.
+  Reduces non-recursively tensors in a data structure with `acc` and `fun`.
 
-  The function receives a tensor and the accumulator for each
-  tensor in the container. It returns the update accumulator.
+  `fun` is invoked with each tensor or tensor container in the
+  data structure plus an accumulator. It must return the new
+  accumulator.
+
+  This function the final accumulator.
+
+  Given `fun` may receive containers, it is not recursive by default.
+  See `Nx.Defn.Composite.reduce/3` for a recursive variant.
   """
-  @spec reduce(t(), acc, (Nx.Tensor.t(), acc -> acc)) :: acc when acc: term()
+  @spec reduce(t(), acc, (Nx.t() | Nx.Container.t(), acc -> acc)) :: acc when acc: term()
   def reduce(data, acc, fun)
 end
 
@@ -103,34 +116,39 @@ defimpl Nx.Container, for: Any do
 
     updates =
       for field <- containers do
-        var = Macro.var(field, __MODULE__)
+        var = Macro.var(field, Nx.Container)
 
         quote do
-          {unquote(var), var!(acc)} = var!(fun).(unquote(var), var!(acc))
+          {unquote(var), acc} = fun.(unquote(var), acc)
         end
       end
 
     reduces =
       for field <- containers do
-        var = Macro.var(field, __MODULE__)
+        var = Macro.var(field, Nx.Container)
 
         quote do
-          var!(acc) = var!(fun).(unquote(var), var!(acc))
+          acc = fun.(unquote(var), acc)
         end
       end
 
-    return = struct |> Map.to_list() |> Keyword.merge(full_pattern)
+    return =
+      struct
+      |> Map.to_list()
+      |> Keyword.drop(keep ++ containers)
+      |> Macro.escape()
+      |> Keyword.merge(full_pattern)
 
     quote do
       defimpl Nx.Container, for: unquote(module) do
-        def traverse(%{unquote_splicing(full_pattern)} = struct, var!(acc), var!(fun)) do
+        def traverse(%{unquote_splicing(full_pattern)} = struct, acc, fun) do
           unquote_splicing(updates)
-          {%{unquote_splicing(return)}, var!(acc)}
+          {%{unquote_splicing(return)}, acc}
         end
 
-        def reduce(%{unquote_splicing(container_pattern)} = struct, var!(acc), var!(fun)) do
+        def reduce(%{unquote_splicing(container_pattern)} = struct, acc, fun) do
           unquote_splicing(reduces)
-          var!(acc)
+          acc
         end
       end
     end
@@ -143,7 +161,7 @@ defimpl Nx.Container, for: Any do
               "because it does not have field #{inspect(field)}"
     end
 
-    {field, Macro.var(field, __MODULE__)}
+    {field, Macro.var(field, Nx.Container)}
   end
 
   def traverse(data, _acc, _fun) do

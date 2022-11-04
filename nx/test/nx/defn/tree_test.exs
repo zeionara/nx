@@ -8,7 +8,7 @@ defmodule Nx.Defn.TreeTest do
   import Nx.Defn
 
   setup do
-    Nx.Defn.default_options(compiler: Nx.Defn.Identity)
+    Nx.Defn.default_options(compiler: Nx.Defn.Debug)
     :ok
   end
 
@@ -33,6 +33,67 @@ defmodule Nx.Defn.TreeTest do
       refute Tree.has_hooks?(hooked_factorial(1, 2), %{})
       assert Tree.has_hooks?(hooked_factorial(1, 2), %{example: & &1})
       assert Tree.has_hooks?(hooked_factorial(1, 2), %{another: & &1})
+    end
+  end
+
+  describe "scope_ids" do
+    defn plus_constant(a), do: a + 10
+
+    test "ignores constants" do
+      a = Expr.parameter(:root, {:u, 64}, {}, 0)
+      assert [{_, :parameter}, {_, :add}] = plus_constant(a) |> Tree.scope_ids() |> Enum.sort()
+    end
+
+    defn inside_cond(bool, a, b) do
+      if bool do
+        a + b
+      else
+        0
+      end
+    end
+
+    test "ignores expressions inside cond" do
+      bool = Expr.parameter(:root, {:u, 64}, {}, 0)
+      a = Expr.parameter(:root, {:u, 64}, {}, 1)
+      b = Expr.parameter(:root, {:u, 64}, {}, 2)
+
+      assert [{_, :cond}] = inside_cond(bool, a, b) |> Tree.scope_ids() |> Enum.sort()
+    end
+
+    defn inside_both_cond(bool, a, b) do
+      add = a + b
+
+      left =
+        if bool do
+          add
+        else
+          1
+        end
+
+      right =
+        if bool do
+          1
+        else
+          add
+        end
+
+      left * right
+    end
+
+    test "keeps expressions shared across conds" do
+      bool = Expr.parameter(:root, {:u, 64}, {}, 0)
+      a = Expr.parameter(:root, {:u, 64}, {}, 1)
+      b = Expr.parameter(:root, {:u, 64}, {}, 2)
+
+      assert [
+               {_, :parameter},
+               {_, :parameter},
+               {_, :parameter},
+               {_, :add},
+               {_, :cond},
+               {_, :cond},
+               {_, :multiply}
+             ] = inside_both_cond(bool, a, b) |> Tree.scope_ids() |> Enum.sort()
     end
   end
 
@@ -82,12 +143,12 @@ defmodule Nx.Defn.TreeTest do
     test "converts scalars" do
       expr = Expr.tensor(Nx.tensor(3, type: {:s, 64}))
 
-      assert %T{data: %Expr{op: :constant}, type: {:s, 32}} =
+      assert %T{data: %Expr{op: :constant, id: {3, {:s, 32}, {}}}, type: {:s, 32}} =
                Tree.rewrite_types(expr, max_signed_type: {:s, 32})
 
       expr = Expr.tensor(Nx.tensor(3.0, type: {:f, 64}))
 
-      assert %T{data: %Expr{op: :constant}, type: {:f, 32}} =
+      assert %T{data: %Expr{op: :constant, id: {3.0, {:f, 32}, {}}}, type: {:f, 32}} =
                Tree.rewrite_types(expr, max_float_type: {:f, 32})
     end
 
@@ -196,7 +257,7 @@ defmodule Nx.Defn.TreeTest do
     test "with while" do
       expr = factorial(Nx.template({}, {:s, 64}))
 
-      assert %T{data: %Expr{op: :elem, args: [while, 0, 2]}, type: {:f, 32}} =
+      assert %T{data: %Expr{op: :elem, args: [while, 0]}, type: {:f, 32}} =
                Tree.rewrite_types(expr, max_signed_type: {:s, 32}, max_float_type: {:f, 32})
 
       assert %T{data: %Expr{op: :while, args: [initial, arg, condition, body]}, type: {:tuple, 2}} =

@@ -1,5 +1,9 @@
 defmodule Nx.BinaryBackend.Matrix do
   @moduledoc false
+  use Complex.Kernel
+  import Kernel, except: [abs: 1]
+  import Complex, only: [abs: 1]
+
   import Nx.Shared
 
   def ts(a_data, a_type, a_shape, b_data, b_type, b_shape, output_type, input_opts) do
@@ -42,7 +46,7 @@ defmodule Nx.BinaryBackend.Matrix do
   # When lower: false, we need the following procedure
   # for reusing the lower_triangular engine:
   #
-  # First, we need to reverse both rows and colums
+  # First, we need to reverse both rows and columns
   # so we can turn an upper-triangular matrix
   # into a lower-triangular one.
   # The result will also be reversed in this case.
@@ -163,7 +167,7 @@ defmodule Nx.BinaryBackend.Matrix do
   defp do_ts([row | rows], [b | bs], idx, acc) do
     value = Enum.fetch!(row, idx)
 
-    if value == 0 do
+    if Complex.abs(value) == 0 do
       raise ArgumentError, "can't solve for singular matrix"
     end
 
@@ -199,8 +203,11 @@ defmodule Nx.BinaryBackend.Matrix do
 
   defp qr_decomposition(matrix, m, n, eps) when m >= n do
     # QR decomposition is performed by using Householder transform
+
+    max_i = if m == n, do: n - 2, else: n - 1
+
     {q_matrix, r_matrix} =
-      for i <- 0..(n - 1), reduce: {nil, matrix} do
+      for i <- 0..max_i, reduce: {nil, matrix} do
         {q, r} ->
           h =
             r
@@ -208,14 +215,16 @@ defmodule Nx.BinaryBackend.Matrix do
             |> householder_reflector(m, eps)
 
           # If we haven't allocated Q yet, let Q = H1
+          # TODO: Resolve inconsistent with the Householder reflector.
+          # cf. https://github.com/elixir-nx/nx/pull/933#discussion_r982772063
           q =
             if is_nil(q) do
               h
             else
-              dot_matrix(q, h)
+              dot_matrix_real(q, h)
             end
 
-          r = dot_matrix(h, r)
+          r = dot_matrix_real(h, r)
           {q, r}
       end
 
@@ -226,24 +235,105 @@ defmodule Nx.BinaryBackend.Matrix do
     raise ArgumentError, "tensor must have at least as many rows as columns"
   end
 
+  def cholesky(data, {_, type_size} = type, {n, n} = shape, output_type) do
+    matrix = binary_to_matrix(data, type, shape)
+
+    # From wikipedia (https://en.wikipedia.org/wiki/Cholesky_decomposition#The_Cholesky%E2%80%93Banachiewicz_and_Cholesky%E2%80%93Crout_algorithms)
+    # adapted to 0-indexing
+    # Ljj := sqrt(Ajj - sum(k=0..j-1)[Complex.abs_squared(Ljk)])
+    # Lij := 1/Ljj * (Aij - sum(k=0..j-1)[Lik * Complex.conjugate(Ljk)])
+
+    zeros_size = n * n * type_size
+    zeros = binary_to_matrix(<<0::size(zeros_size)>>, type, shape)
+
+    # check if matrix is hermitian
+    eps = 1.0e-10
+
+    for i <- 0..(n - 1) do
+      row = matrix |> get_matrix_rows([i]) |> List.flatten()
+      col = matrix |> get_matrix_columns([i]) |> List.flatten()
+
+      Enum.zip_with(row, col, fn a_ij, a_ji ->
+        re_ij = Complex.real(a_ij)
+        im_ij = Complex.imag(a_ij)
+
+        re_ji = Complex.real(a_ji)
+        im_ji = Complex.imag(a_ji)
+
+        # Conj(a + bi) = a - bi
+
+        if abs(re_ij - re_ji) > eps do
+          raise_not_hermitian()
+        end
+
+        case {im_ij, im_ji} do
+          {:infinity, :neg_infinity} ->
+            :ok
+
+          {:neg_infinity, :infinity} ->
+            :ok
+
+          {x, y} ->
+            if Complex.abs(x + y) > eps do
+              raise_not_hermitian()
+            end
+        end
+      end)
+    end
+
+    l =
+      for i <- 0..(n - 1), j <- 0..i, i >= j, reduce: zeros do
+        l ->
+          [a_ij] = get_matrix_elements(matrix, [[i, j]])
+
+          k_len = max(j, 0)
+          slice_i = slice_matrix(l, [i, 0], [1, k_len])
+          slice_j = slice_matrix(l, [j, 0], [1, k_len])
+
+          sum =
+            slice_i
+            |> Enum.zip_with(slice_j, fn l_ik, l_jk -> l_ik * Complex.conjugate(l_jk) end)
+            |> Enum.reduce(0, &+/2)
+
+          l_ij =
+            if i == j do
+              Complex.sqrt(a_ij - sum)
+            else
+              [l_jj] = get_matrix_elements(l, [[j, j]])
+
+              (a_ij - sum) / l_jj
+            end
+
+          replace_matrix_element(l, i, j, l_ij)
+      end
+
+    matrix_to_binary(l, output_type)
+  end
+
+  defp raise_not_hermitian do
+    raise ArgumentError,
+          "matrix must be hermitian, a matrix is hermitian iff X = adjoint(X)"
+  end
+
   def eigh(input_data, input_type, {n, n} = input_shape, output_type, opts) do
-    # The input symmetric matrix A reduced to Hessenberg matrix H by Householder transform.
+    # The input Hermitian matrix A reduced to Hessenberg matrix H by Householder transform.
     # Then, by using QR iteration it converges to AQ = QΛ,
     # where Λ is the diagonal matrix of eigenvalues and the columns of Q are the eigenvectors.
 
     eps = opts[:eps]
     max_iter = opts[:max_iter]
 
-    # Validate that the input is a symmetric matrix using the relation A^t = A.
+    # Validate that the input is a Hermitian matrix using the relation A^* = A.
     a = binary_to_matrix(input_data, input_type, input_shape)
 
-    is_sym =
+    is_hermitian =
       a
       |> transpose_matrix()
+      |> Enum.map(fn a_row -> Enum.map(a_row, &Complex.conjugate(&1)) end)
       |> is_approximately_same?(a, eps)
 
-    unless is_sym do
-      raise ArgumentError, "input tensor must be symmetric"
+    unless is_hermitian do
+      raise_not_hermitian()
     end
 
     # Hessenberg decomposition
@@ -256,8 +346,8 @@ defmodule Nx.BinaryBackend.Matrix do
         {q_now, r_now} = qr_decomposition(a_old, n, n, eps)
 
         # Update matrix A, Q
-        a_new = dot_matrix(r_now, q_now)
-        q_new = dot_matrix(q_old, q_now)
+        a_new = dot_matrix_real(r_now, q_now)
+        q_new = dot_matrix_real(q_old, q_now)
 
         if is_approximately_same?(q_old, q_new, eps) do
           {:halt, {a_new, q_new}}
@@ -270,8 +360,11 @@ defmodule Nx.BinaryBackend.Matrix do
     indices_diag = for idx <- 0..(n - 1), do: [idx, idx]
     eigenvals = get_matrix_elements(eigenvals_diag, indices_diag)
 
+    # In general, the eigenvalues of a Hermitian matrix are real numbers
+    eigenvals_real = eigenvals |> Enum.map(&Complex.real(&1))
+
     # Reduce the elements smaller than eps to zero
-    {eigenvals |> approximate_zeros(eps) |> matrix_to_binary(output_type),
+    {eigenvals_real |> approximate_zeros(eps) |> matrix_to_binary(output_type),
      eigenvecs |> approximate_zeros(eps) |> matrix_to_binary(output_type)}
   end
 
@@ -286,20 +379,22 @@ defmodule Nx.BinaryBackend.Matrix do
             |> householder_reflector(n, eps)
 
           # If we haven't allocated Q yet, let Q = H1
+          # TODO: Resolve inconsistent with the Householder reflector.
+          # cf. https://github.com/elixir-nx/nx/pull/933#discussion_r982772063
           q =
             if is_nil(q) do
               h
             else
-              dot_matrix(q, h)
+              dot_matrix_real(q, h)
             end
 
           # Hessenberg matrix H updating
-          h_t = transpose_matrix(h)
+          h_adj = adjoint_matrix(h)
 
           hess =
             h
-            |> dot_matrix(hess)
-            |> dot_matrix(h_t)
+            |> dot_matrix_real(hess)
+            |> dot_matrix_real(h_adj)
 
           {hess, q}
       end
@@ -307,19 +402,14 @@ defmodule Nx.BinaryBackend.Matrix do
     {approximate_zeros(hess_matrix, eps), approximate_zeros(q_matrix, eps)}
   end
 
-  # TODO: Eliminate this function and use the binary implementation
   defp is_approximately_same?(a, b, eps) do
     # Determine if matrices `a` and `b` are equal in the range of eps
-    Enum.zip(a, b)
+    a
+    |> Enum.zip(b)
     |> Enum.all?(fn {a_row, b_row} ->
-      Enum.zip(a_row, b_row)
-      |> Enum.map(&Tuple.to_list(&1))
-      |> Enum.all?(
-        &Enum.reduce(
-          &1,
-          fn a_elem, b_elem -> abs(a_elem - b_elem) <= eps end
-        )
-      )
+      a_row
+      |> Enum.zip(b_row)
+      |> Enum.all?(fn {a_elem, b_elem} -> Complex.abs(a_elem - b_elem) <= eps end)
     end)
   end
 
@@ -418,7 +508,8 @@ defmodule Nx.BinaryBackend.Matrix do
         input_data,
         input_type,
         input_shape,
-        {_u_holder, %{type: output_type}, %{shape: {vt_rows, vt_cols}}},
+        output_type,
+        {vt_rows, vt_cols},
         opts
       ) do
     # This implementation is a mixture of concepts described in [1] and the
@@ -466,9 +557,6 @@ defmodule Nx.BinaryBackend.Matrix do
 
     {s, [vt_row | _] = vt} = apply_singular_value_corrections(s, vt)
 
-    # TODO: complete the vt matrix with linearly independent rows
-    # requires solving a homogeneous equation system for non-homogenous
-    # solutions
     if length(vt) != vt_rows or length(vt_row) != vt_cols do
       raise "vt matrix completion for wide-matrices not implemented for Nx.BinaryBackend"
     end
@@ -516,6 +604,7 @@ defmodule Nx.BinaryBackend.Matrix do
 
     # This function also sorts singular values from highest to lowest,
     # as this can be convenient.
+
     s
     |> Enum.zip_with(transpose_matrix(v), fn
       singular_value, row when singular_value < 0 ->
@@ -541,31 +630,8 @@ defmodule Nx.BinaryBackend.Matrix do
     Enum.chunk_every(flat_list, target_k)
   end
 
-  defp householder_reflector([a_0 | tail] = a, target_k, eps) do
-    # This is a trick so we can both calculate the norm of a_reverse and extract the
-    # head a the same time we reverse the array
-    # receives a_reverse as a list of numbers and returns the reflector as a
-    # k x k matrix
-
-    norm_a_squared = Enum.reduce(a, 0, fn x, acc -> x * x + acc end)
-    norm_a_sq_1on = norm_a_squared - a_0 * a_0
-
-    {v, scale} =
-      if norm_a_sq_1on < eps do
-        {[1 | tail], 0}
-      else
-        v_0 =
-          if a_0 <= 0 do
-            a_0 - :math.sqrt(norm_a_squared)
-          else
-            -norm_a_sq_1on / (a_0 + :math.sqrt(norm_a_squared))
-          end
-
-        v_0_sq = v_0 * v_0
-        scale = 2 * v_0_sq / (norm_a_sq_1on + v_0_sq)
-        v = [1 | Enum.map(tail, &(&1 / v_0))]
-        {v, scale}
-      end
+  defp householder_reflector(a, target_k, eps) do
+    {v, scale, is_complex} = householder_reflector_pivot(a, eps)
 
     prefix_threshold = target_k - length(v)
     v = List.duplicate(0, prefix_threshold) ++ v
@@ -577,6 +643,8 @@ defmodule Nx.BinaryBackend.Matrix do
     {_, _, reflector_reversed} =
       for col_factor <- v, row_factor <- v, reduce: {0, 0, []} do
         {row, col, acc} ->
+          row_factor = if is_complex, do: Complex.conjugate(row_factor), else: row_factor
+
           # The current element in outer(v, v) is given by col_factor * row_factor
           # and the current I element is 1 when row == col
           identity_element = if row == col, do: 1, else: 0
@@ -612,6 +680,61 @@ defmodule Nx.BinaryBackend.Matrix do
       end
 
     reflector
+  end
+
+  defp householder_reflector_pivot([a_0 | tail] = a, eps) when is_number(a_0) do
+    # This is a trick so we can both calculate the norm of a_reverse and extract the
+    # head a the same time we reverse the array
+    # receives a_reverse as a list of numbers and returns the reflector as a
+    # k x k matrix
+
+    norm_a_squared = Enum.reduce(a, 0, fn x, acc -> x * Complex.conjugate(x) + acc end)
+    norm_a_sq_1on = norm_a_squared - a_0 * a_0
+
+    if norm_a_sq_1on < eps do
+      {[1 | tail], 0, false}
+    else
+      v_0 =
+        if a_0 <= 0 do
+          a_0 - :math.sqrt(norm_a_squared)
+        else
+          -norm_a_sq_1on / (a_0 + :math.sqrt(norm_a_squared))
+        end
+
+      v_0_sq = v_0 * v_0
+      scale = 2 * v_0_sq / (norm_a_sq_1on + v_0_sq)
+      v = [1 | Enum.map(tail, &(&1 / v_0))]
+      {v, scale, false}
+    end
+  end
+
+  defp householder_reflector_pivot([a_0 | tail], _eps) do
+    # complex case
+    norm_a_sq_1on = Enum.reduce(tail, 0, &(Complex.abs_squared(&1) + &2))
+    norm_a_sq = norm_a_sq_1on + Complex.abs_squared(a_0)
+    norm_a = :math.sqrt(norm_a_sq)
+
+    phase_a_0 = Complex.phase(a_0)
+    alfa = Complex.exp(Complex.new(0, phase_a_0)) * norm_a
+
+    # u = x - alfa * e1
+    u_0 = a_0 + alfa
+    u = [u_0 | tail]
+    norm_u_sq = norm_a_sq_1on + Complex.abs_squared(u_0)
+    norm_u = :math.sqrt(norm_u_sq)
+
+    v = Enum.map(u, &(&1 / norm_u))
+    {v, 2, true}
+  end
+
+  defp householder_bidiagonalization(a, {m, 1}, eps) do
+    a = List.flatten(a)
+    u = householder_reflector(a, m, eps)
+    s = Enum.reduce(a, 0, fn x, acc -> x * Complex.conjugate(x) + acc end)
+    s = [[Complex.sqrt(s)]]
+    vt = [[1]]
+
+    {u, s, vt}
   end
 
   defp householder_bidiagonalization(tensor, {m, n}, eps) do
@@ -745,9 +868,29 @@ defmodule Nx.BinaryBackend.Matrix do
       |> Enum.map(fn col ->
         row
         |> Enum.zip(col)
+        |> Enum.reduce(0, fn {x, y}, acc -> acc + x * Complex.conjugate(y) end)
+      end)
+    end)
+  end
+
+  defp dot_matrix_real(m1, m2) do
+    Enum.map(m1, fn row ->
+      m2
+      |> transpose_matrix()
+      |> Enum.map(fn col ->
+        row
+        |> Enum.zip(col)
         |> Enum.reduce(0, fn {x, y}, acc -> acc + x * y end)
       end)
     end)
+  end
+
+  defp adjoint_matrix([x | _] = m) when not is_list(x) do
+    Enum.map(m, &[Complex.conjugate(&1)])
+  end
+
+  defp adjoint_matrix(m) do
+    Enum.zip_with(m, fn cols -> Enum.map(cols, &Complex.conjugate/1) end)
   end
 
   defp transpose_matrix([x | _] = m) when not is_list(x) do
@@ -837,7 +980,7 @@ defmodule Nx.BinaryBackend.Matrix do
   end
 
   defp approximate_zeros(matrix, tol) do
-    do_round = fn x -> if abs(x) < tol, do: 0, else: x end
+    do_round = fn x -> if Complex.abs(x) < tol, do: 0 * x, else: x end
 
     Enum.map(matrix, fn
       row when is_list(row) -> Enum.map(row, do_round)

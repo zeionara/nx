@@ -7,7 +7,7 @@ defmodule Nx.Defn.StreamTest do
   defn defn_sum(entry, acc), do: {acc, entry + acc}
 
   def elixir_sum(entry, acc) do
-    true = Process.get(Nx.Defn.Compiler) in [Nx.Defn.Evaluator, Nx.Defn.Identity]
+    true = Process.get(Nx.Defn.Compiler) in [Nx.Defn.Evaluator, Nx.Defn.Debug]
     {acc, Nx.add(entry, acc)}
   end
 
@@ -22,6 +22,19 @@ defmodule Nx.Defn.StreamTest do
     assert Nx.Stream.done(stream) == Nx.tensor(3)
   end
 
+  defn defn_sum_with_args(entry, acc, a, b), do: {acc, entry + acc + (a - b)}
+
+  test "runs defn stream with args" do
+    %_{} = stream = Nx.Defn.stream(&defn_sum_with_args/4, [0, 0, 2, 1])
+    assert Nx.Stream.send(stream, 1) == :ok
+    assert Nx.Stream.recv(stream) == Nx.tensor(0)
+
+    assert Nx.Stream.send(stream, 2) == :ok
+    assert Nx.Stream.recv(stream) == Nx.tensor(2)
+
+    assert Nx.Stream.done(stream) == Nx.tensor(5)
+  end
+
   test "runs elixir stream" do
     %_{} = stream = Nx.Defn.stream(&elixir_sum/2, [0, 0])
     assert Nx.Stream.send(stream, 1) == :ok
@@ -34,7 +47,7 @@ defmodule Nx.Defn.StreamTest do
   end
 
   test "converts accumulator to tensors" do
-    assert %_{} = stream = Nx.Defn.stream(fn -> :unused end, [1, {2, 3}])
+    assert %_{} = stream = Nx.Defn.stream(fn _, _ -> {0, 0} end, [1, {2, 3}])
     assert Nx.Stream.done(stream) == {Nx.tensor(2), Nx.tensor(3)}
   end
 
@@ -49,7 +62,7 @@ defmodule Nx.Defn.StreamTest do
   @tag :capture_log
   test "raises on errors" do
     Process.flag(:trap_exit, true)
-    assert %_{} = stream = Nx.Defn.stream(fn _, _ -> :bad end, [1, 2])
+    assert %_{} = stream = Nx.Defn.stream(fn _, _ -> 0 end, [1, 2])
 
     assert Nx.Stream.send(stream, 1) == :ok
     assert catch_exit(Nx.Stream.recv(stream))
@@ -59,7 +72,7 @@ defmodule Nx.Defn.StreamTest do
   end
 
   test "raises if stream is not compatible on send" do
-    assert %_{} = stream = Nx.Defn.stream(fn -> :unused end, [1, {2, 3}])
+    assert %_{} = stream = Nx.Defn.stream(fn _, _ -> {0, 0} end, [1, {2, 3}])
 
     assert_raise ArgumentError,
                  ~r/Nx stream expected a tensor of type, shape, and names on send/,
@@ -77,7 +90,7 @@ defmodule Nx.Defn.StreamTest do
   end
 
   test "raises if already done" do
-    assert %_{} = stream = Nx.Defn.stream(fn -> :bad end, [1, 2])
+    assert %_{} = stream = Nx.Defn.stream(fn _, _ -> 0 end, [1, 2])
     assert Nx.Stream.done(stream) == Nx.tensor(2)
     assert {:noproc, _} = catch_exit(Nx.Stream.done(stream))
   end
@@ -93,7 +106,7 @@ defmodule Nx.Defn.StreamTest do
 
   test "raises if stream is done when recving" do
     Process.flag(:trap_exit, true)
-    assert %_{} = stream = Nx.Defn.stream(fn -> :bad end, [1, 2])
+    assert %_{} = stream = Nx.Defn.stream(fn _, _ -> 0 end, [1, 2])
 
     assert capture_log(fn ->
              Task.start_link(fn -> Nx.Stream.recv(stream) end)
@@ -130,5 +143,22 @@ defmodule Nx.Defn.StreamTest do
     assert Nx.Stream.recv(stream) == %Container{a: Nx.tensor(3), b: Nx.tensor(-2), d: :elem}
 
     assert Nx.Stream.done(stream) == %Container{a: Nx.tensor(0), b: Nx.tensor(3), d: :acc}
+  end
+
+  defn lazy_container_stream(%LazyWrapped{a: a, c: c}, acc) do
+    {acc, acc + a - c}
+  end
+
+  test "lazy container in" do
+    args = [%LazyOnly{a: 0, b: 0, c: 0}, 0]
+    %_{} = stream = Nx.Defn.stream(&lazy_container_stream/2, args)
+
+    assert Nx.Stream.send(stream, %LazyOnly{a: 3, b: 0, c: -1}) == :ok
+    assert Nx.Stream.recv(stream) == Nx.tensor(0)
+
+    assert Nx.Stream.send(stream, %LazyOnly{a: 5, b: 0, c: 2}) == :ok
+    assert Nx.Stream.recv(stream) == Nx.tensor(4)
+
+    assert Nx.Stream.done(stream) == Nx.tensor(7)
   end
 end

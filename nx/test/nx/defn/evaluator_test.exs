@@ -24,12 +24,35 @@ defmodule Nx.Defn.EvaluatorTest do
   test "concatenate" do
     assert concatenate(Nx.tensor([1, 2, 3]), Nx.tensor([4, 5, 6])) ==
              Nx.tensor([1, 2, 3, 4, 5, 6])
+
+    assert_raise RuntimeError, "cannot perform operations on a Nx.TemplateBackend tensor", fn ->
+      # Check we will pick Nx.Template from list
+      concatenate(Nx.template({3}, {:f, 32}), Nx.template({3}, {:f, 32}))
+    end
+  end
+
+  defn slice(a, b), do: Nx.slice(a, [b], [1])
+
+  test "slice" do
+    assert slice(Nx.tensor([1, 2, 3]), Nx.tensor(0)) == Nx.tensor([1])
+
+    assert_raise RuntimeError, "cannot perform operations on a Nx.TemplateBackend tensor", fn ->
+      # Check we will pick Nx.Template from the slice
+      slice(Nx.tensor([1, 2, 3]), Nx.template({}, {:s, 32}))
+    end
   end
 
   defn reshape(t), do: Nx.reshape(t, {3, 2})
 
   test "reshape" do
     assert %T{shape: {3, 2}, type: {:s, 64}} = reshape(Nx.iota({2, 3}))
+  end
+
+  defn reduce_window(t1, acc),
+    do: Nx.window_reduce(t1, acc, {2}, [padding: :valid], fn x, acc -> x + acc end)
+
+  test "window reduce" do
+    assert reduce_window(Nx.tensor([1, 2, 3]), 0) == Nx.tensor([3, 5])
   end
 
   describe "decompositions" do
@@ -49,7 +72,7 @@ defmodule Nx.Defn.EvaluatorTest do
 
       assert q ==
                Nx.tensor([
-                 [0.0, 0.9128709435462952],
+                 [-0.0, 0.9128709435462952],
                  [0.4472135901451111, 0.3651483654975891],
                  [0.8944271802902222, -0.18257418274879456]
                ])
@@ -57,7 +80,7 @@ defmodule Nx.Defn.EvaluatorTest do
       assert r ==
                Nx.tensor([
                  [4.4721360206604, 5.813776969909668],
-                 [0.0, 1.095445156097412]
+                 [-0.0, 1.095445156097412]
                ])
     end
 
@@ -279,16 +302,16 @@ defmodule Nx.Defn.EvaluatorTest do
       container = %Container{a: 1, b: -1, c: :reset, d: :kept}
 
       assert container_cond(container, 1) ==
-               %Container{a: Nx.tensor(2), b: Nx.tensor(-1), c: nil, d: :kept}
+               %Container{a: Nx.tensor(2), b: Nx.tensor(-1), c: %{}, d: :kept}
 
       assert container_cond(container, 0) ==
-               %Container{a: Nx.tensor(1), b: Nx.tensor(-2), c: nil, d: :kept}
+               %Container{a: Nx.tensor(1), b: Nx.tensor(-2), c: %{}, d: :kept}
     end
   end
 
-  defn labelled_inspect(a, b), do: inspect_value(a + b, label: "add")
+  defn labelled_inspect(a, b), do: print_value(a + b, label: "add")
 
-  test "inspect_value/2" do
+  test "print_value/2" do
     assert ExUnit.CaptureIO.capture_io(fn -> labelled_inspect(1, 2) end) ==
              """
              add: #Nx.Tensor<
@@ -308,15 +331,33 @@ defmodule Nx.Defn.EvaluatorTest do
       assert_received {:default, tensor}
       assert tensor == Nx.tensor(3)
 
-      assert Nx.Defn.jit(&basic_hook/2, [1, 2]) == Nx.tensor(3)
+      assert Nx.Defn.jit(&basic_hook/2).(1, 2) == Nx.tensor(3)
       assert_received {:default, tensor}
       assert tensor == Nx.tensor(3)
 
-      assert Nx.Defn.jit(&basic_hook/2, [1, 2], hooks: %{example: &send_to_self({:custom, &1})}) ==
-               Nx.tensor(3)
+      fun = Nx.Defn.jit(&basic_hook/2, hooks: %{example: &send_to_self({:custom, &1})})
+      assert fun.(1, 2) == Nx.tensor(3)
 
       assert_received {:custom, tensor}
       assert tensor == Nx.tensor(3)
+    end
+
+    defn container_hook(a, b), do: hook({a, b}, :example, &send_to_self({:default, &1}))
+
+    test "container hook with overriddes" do
+      assert container_hook(1, 2) == {Nx.tensor(1), Nx.tensor(2)}
+      assert_received {:default, tuple}
+      assert tuple == {Nx.tensor(1), Nx.tensor(2)}
+
+      assert Nx.Defn.jit(&container_hook/2).(1, 2) == {Nx.tensor(1), Nx.tensor(2)}
+      assert_received {:default, tuple}
+      assert tuple == {Nx.tensor(1), Nx.tensor(2)}
+
+      fun = Nx.Defn.jit(&container_hook/2, hooks: %{example: &send_to_self({:custom, &1})})
+      assert fun.(1, 2) == {Nx.tensor(1), Nx.tensor(2)}
+
+      assert_received {:custom, tuple}
+      assert tuple == {Nx.tensor(1), Nx.tensor(2)}
     end
 
     defn side_effect_hooks(a, b) do
@@ -331,19 +372,19 @@ defmodule Nx.Defn.EvaluatorTest do
       refute_received _
 
       hooks = %{a: &send_to_self({:a, &1})}
-      Nx.Defn.jit(&side_effect_hooks/2, [1, 2], hooks: hooks)
+      Nx.Defn.jit(&side_effect_hooks/2, hooks: hooks).(1, 2)
       assert_received {:a, tensor}
       assert tensor == Nx.tensor(1)
       refute_received _
 
       hooks = %{b: &send_to_self({:b, &1})}
-      Nx.Defn.jit(&side_effect_hooks/2, [1, 2], hooks: hooks)
+      Nx.Defn.jit(&side_effect_hooks/2, hooks: hooks).(1, 2)
       assert_received {:b, tensor}
       assert tensor == Nx.tensor(2)
       refute_received _
 
       hooks = %{a: &send_to_self({:a, &1}), b: &send_to_self({:b, &1})}
-      Nx.Defn.jit(&side_effect_hooks/2, [1, 2], hooks: hooks)
+      Nx.Defn.jit(&side_effect_hooks/2, hooks: hooks).(1, 2)
       {:messages, [b: _, a: _]} = Process.info(self(), :messages)
       assert_received {:b, tensor}
       assert tensor == Nx.tensor(2)
@@ -363,19 +404,19 @@ defmodule Nx.Defn.EvaluatorTest do
       refute_received _
 
       hooks = %{a: &send_to_self({:a, &1})}
-      Nx.Defn.jit(&side_effect_nested_hooks/2, [1, 2], hooks: hooks)
+      Nx.Defn.jit(&side_effect_nested_hooks/2, hooks: hooks).(1, 2)
       assert_received {:a, tensor}
       assert tensor == Nx.tensor(1)
       refute_received _
 
       hooks = %{b: &send_to_self({:b, &1})}
-      Nx.Defn.jit(&side_effect_nested_hooks/2, [1, 2], hooks: hooks)
+      Nx.Defn.jit(&side_effect_nested_hooks/2, hooks: hooks).(1, 2)
       assert_received {:b, tensor}
       assert tensor == Nx.tensor(2)
       refute_received _
 
       hooks = %{a: &send_to_self({:a, &1}), b: &send_to_self({:b, &1})}
-      Nx.Defn.jit(&side_effect_nested_hooks/2, [1, 2], hooks: hooks)
+      Nx.Defn.jit(&side_effect_nested_hooks/2, hooks: hooks).(1, 2)
       {:messages, [b: _, a: _]} = Process.info(self(), :messages)
       assert_received {:b, tensor}
       assert tensor == Nx.tensor(2)
@@ -396,7 +437,7 @@ defmodule Nx.Defn.EvaluatorTest do
       assert tensor == Nx.tensor(2)
 
       hooks = %{a: &send_to_self({:a, &1})}
-      Nx.Defn.jit(&side_effect_nested_hook_with_default/2, [1, 2], hooks: hooks)
+      Nx.Defn.jit(&side_effect_nested_hook_with_default/2, hooks: hooks).(1, 2)
       {:messages, [b: _, a: _]} = Process.info(self(), :messages)
       assert_received {:b, tensor}
       assert tensor == Nx.tensor(2)
@@ -404,7 +445,7 @@ defmodule Nx.Defn.EvaluatorTest do
       assert tensor == Nx.tensor(1)
 
       hooks = %{b: &send_to_self({:custom, &1})}
-      Nx.Defn.jit(&side_effect_nested_hook_with_default/2, [1, 2], hooks: hooks)
+      Nx.Defn.jit(&side_effect_nested_hook_with_default/2, hooks: hooks).(1, 2)
       assert_received {:custom, tensor}
       assert tensor == Nx.tensor(2)
 
@@ -421,7 +462,7 @@ defmodule Nx.Defn.EvaluatorTest do
       assert hook_upto10(5) == Nx.tensor(10)
       refute_received _
 
-      assert Nx.Defn.jit(&hook_upto10/1, [5], hooks: %{while: &send_to_self({:while, &1})}) ==
+      assert Nx.Defn.jit(&hook_upto10/1, hooks: %{while: &send_to_self({:while, &1})}).(5) ==
                Nx.tensor(10)
 
       assert_received {:while, tensor}
@@ -435,6 +476,148 @@ defmodule Nx.Defn.EvaluatorTest do
       assert_received {:while, tensor}
       assert tensor == Nx.tensor(10)
       refute_received _
+    end
+  end
+
+  describe "cond cache" do
+    # The goal of those tests is to show that expressions inside cond are cached,
+    # regardless of evaluation order.
+    defn cond_cache_left(bool, a, b) do
+      res = hook(a + b, :example, &send_to_self({:hook, &1}))
+
+      cond =
+        if bool do
+          res
+        else
+          0
+        end
+
+      cond * res
+    end
+
+    test "on lhs" do
+      assert cond_cache_left(0, 1, 2) == Nx.tensor(0)
+      assert_received {:hook, _}
+      refute_received {:hook, _}
+
+      assert cond_cache_left(1, 1, 2) == Nx.tensor(9)
+      assert_received {:hook, _}
+      refute_received {:hook, _}
+    end
+
+    defn cond_cache_right(bool, a, b) do
+      res = hook(a + b, :example, &send_to_self({:hook, &1}))
+
+      cond =
+        if bool do
+          res
+        else
+          0
+        end
+
+      res * cond
+    end
+
+    test "on rhs" do
+      assert cond_cache_right(0, 1, 2) == Nx.tensor(0)
+      assert_received {:hook, _}
+      refute_received {:hook, _}
+
+      assert cond_cache_right(1, 1, 2) == Nx.tensor(9)
+      assert_received {:hook, _}
+      refute_received {:hook, _}
+    end
+
+    defn cond_cache_both(bool, a, b) do
+      res = hook(a + b, :example, &send_to_self({:hook, &1}))
+
+      left =
+        if bool do
+          res
+        else
+          -res
+        end
+
+      right =
+        if bool do
+          res * 2
+        else
+          res
+        end
+
+      left * right
+    end
+
+    test "on both" do
+      assert cond_cache_both(0, 4, 5) == Nx.tensor(-81)
+      assert_received {:hook, _}
+      refute_received {:hook, _}
+
+      assert cond_cache_both(1, 4, 5) == Nx.tensor(162)
+      assert_received {:hook, _}
+      refute_received {:hook, _}
+    end
+
+    defn cond_cache_map(state) do
+      state =
+        if state.iteration < 4 do
+          if state.iteration != 1 do
+            state
+          else
+            state
+          end
+        else
+          state
+        end
+
+      %{state | iteration: state.iteration + 1}
+    end
+
+    test "with nested map" do
+      assert cond_cache_map(%{iteration: 0}) ==
+               %{iteration: Nx.tensor(1)}
+
+      # Use :abc/:xyz so we try different key orderings.
+      assert cond_cache_map(%{iteration: 0, abc: 1}) ==
+               %{iteration: Nx.tensor(1), abc: Nx.tensor(1)}
+
+      assert cond_cache_map(%{iteration: 0, xyz: 1}) ==
+               %{iteration: Nx.tensor(1), xyz: Nx.tensor(1)}
+
+      assert cond_cache_map(%{iteration: 4}) ==
+               %{iteration: Nx.tensor(5)}
+
+      # Use :abc/:xyz so we try different key orderings.
+      assert cond_cache_map(%{iteration: 4, abc: 1}) ==
+               %{iteration: Nx.tensor(5), abc: Nx.tensor(1)}
+
+      assert cond_cache_map(%{iteration: 4, xyz: 1}) ==
+               %{iteration: Nx.tensor(5), xyz: Nx.tensor(1)}
+    end
+
+    defn cond_nested_condition_cache(state) do
+      {state, prev} =
+        if state.iteration < 12 do
+          sign = if(state.iteration < 2, do: 1, else: -1)
+
+          factor =
+            if sign >= 0 do
+              2
+            else
+              1
+            end
+
+          {state, factor}
+        else
+          {state, 1}
+        end
+
+      %{state | iteration: state.iteration + prev}
+    end
+
+    test "with nested condition" do
+      assert cond_nested_condition_cache(%{iteration: 0}) == %{iteration: Nx.tensor(2)}
+      assert cond_nested_condition_cache(%{iteration: 12}) == %{iteration: Nx.tensor(13)}
     end
   end
 end

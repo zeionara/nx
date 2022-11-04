@@ -12,6 +12,39 @@ defmodule EXLA.Client do
   defstruct [:ref, :platform, :name, :device_count, :default_device_id]
 
   @doc """
+  Returns the name of the default client.
+  """
+  def default_name do
+    case Application.fetch_env(:exla, :default_client) do
+      {:ok, client} ->
+        client
+
+      :error ->
+        all_clients = Application.fetch_env!(:exla, :clients)
+        preferred_clients = Application.fetch_env!(:exla, :preferred_clients)
+        supported_platforms = get_supported_platforms()
+
+        client =
+          Enum.find(preferred_clients, fn client ->
+            config =
+              all_clients[client] ||
+                raise "unknown client #{inspect(client)} given as :preferred_clients"
+
+            Map.has_key?(supported_platforms, config[:platform] || :host)
+          end)
+
+        unless client do
+          raise(
+            "could not find default client for EXLA. The configured EXLA clients are: #{inspect(all_clients)}"
+          )
+        end
+
+        Application.put_env(:exla, :default_client, client)
+        client
+    end
+  end
+
+  @doc """
   Fetches a client with the given `name` from configuration.
   """
   def fetch!(name) when is_atom(name) do
@@ -66,7 +99,7 @@ defmodule EXLA.Client do
   end
 
   @doc """
-  Sends buffer from device outfeed to the given process tagged by `ref``.
+  Sends buffer from device outfeed to the given process tagged by `ref`.
 
   > Note: XLA does not support tuple outfeed shapes. Passing one will simply
   > block the operation indefinitely. Instead, convert the tuple into multiple
@@ -75,6 +108,14 @@ defmodule EXLA.Client do
   def from_outfeed(%EXLA.Client{ref: client}, device_id, shapes, pid, ref) when is_list(shapes) do
     shape_refs = Enum.map(shapes, fn %EXLA.Shape{ref: shape_ref} -> shape_ref end)
     EXLA.NIF.transfer_from_outfeed(client, device_id, shape_refs, pid, ref) |> unwrap!()
+  end
+
+  @doc """
+  Copies buffer to device with given device ID.
+  """
+  def copy_buffer_to_device(%EXLA.Client{ref: client}, %EXLA.DeviceBuffer{ref: buffer}, device_id)
+      when is_integer(device_id) do
+    EXLA.NIF.copy_buffer_to_device(client, buffer, device_id) |> unwrap!()
   end
 
   ## Callbacks

@@ -5,6 +5,9 @@ TORCHX_SO = $(PRIV_DIR)/torchx.so
 # CMAKE_BUILD_FLAGS = --verbose
 CMAKE_BUILD_DIR ?= $(MIX_APP_PATH)/cmake
 C_SRC = $(shell pwd)/c_src
+ifdef CMAKE_TOOLCHAIN_FILE
+	CMAKE_CONFIGURE_FLAGS=-DCMAKE_TOOLCHAIN_FILE="$(CMAKE_TOOLCHAIN_FILE)"
+endif
 
 .DEFAULT_GLOBAL := build
 
@@ -22,9 +25,14 @@ check_libtorch:
 $(TORCHX_SO): c_src/torchx.cpp c_src/nx_nif_utils.hpp
 	@ mkdir -p $(PRIV_DIR)
 	@ mkdir -p $(CMAKE_BUILD_DIR)
-	@ ln -sf $(abspath $(LIBTORCH_DIR)/lib) $(PRIV_DIR)/libtorch
+	@ if [ "${MIX_BUILD_EMBEDDED}" = "true" ]; then \
+		cp -a $(abspath $(LIBTORCH_DIR)/lib) $(PRIV_DIR)/$(LIBTORCH_BASE) ; \
+	else \
+		ln -sf $(abspath $(LIBTORCH_DIR)/lib) $(PRIV_DIR)/$(LIBTORCH_BASE) ; \
+	fi
 	@ cd $(CMAKE_BUILD_DIR) && \
 		cmake -DCMAKE_PREFIX_PATH=$(LIBTORCH_DIR) -DC_SRC=$(C_SRC) \
-      	-DERTS_INCLUDE_DIR=$(ERTS_INCLUDE_DIR) -S $(shell pwd) && \
+				-DLIBTORCH_BASE=$(LIBTORCH_BASE) -DERTS_INCLUDE_DIR=$(ERTS_INCLUDE_DIR) \
+				-S $(shell pwd) $(CMAKE_CONFIGURE_FLAGS) && \
 		cmake --build . $(CMAKE_BUILD_FLAGS)
 	@ mv $(CMAKE_BUILD_DIR)/torchx.so $(TORCHX_SO)

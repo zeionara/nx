@@ -2,14 +2,14 @@ defmodule EXLAHelpers do
   @doc """
   Returns the default EXLA client.
   """
-  def client(), do: EXLA.Client.fetch!(String.to_atom(System.get_env("EXLA_TARGET", "host")))
+  def client(), do: EXLA.Client.fetch!(EXLA.Client.default_name())
 
   @doc """
   Compiles the given function.
 
   It expects a list of shapes which will be given as parameters.
   """
-  def compile(shapes, fun, opts \\ []) do
+  def compile(shapes, opts \\ [], fun) do
     builder = EXLA.Builder.new("test")
 
     {params, _} =
@@ -29,8 +29,9 @@ defmodule EXLAHelpers do
   It expects a list of buffers which will be have their shapes
   used for compilation and then given on execution.
   """
-  def run(args, opts \\ [], fun) do
-    exec = compile(Enum.map(args, & &1.shape), fun, opts)
-    EXLA.Executable.run(exec, args, opts)
+  def run_one(args, opts \\ [], fun) do
+    exec = compile(Enum.map(args, & &1.shape), opts, fun)
+    [result] = EXLA.Executable.run(exec, [args], opts)
+    result
   end
 end
