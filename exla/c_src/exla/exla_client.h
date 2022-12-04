@@ -8,8 +8,8 @@
 #include "exla_nif_util.h"
 #include "tensorflow/core/platform/types.h"
 #include "tensorflow/core/platform/status.h"
+#include "tensorflow/compiler/xla/pjrt/gpu/gpu_helpers.h"
 #include "tensorflow/compiler/xla/pjrt/pjrt_client.h"
-#include "tensorflow/compiler/xla/pjrt/gpu_device.h"
 
 // The implementations in this module are designed after implementations
 // in the XLA runtime, PjRt. Deviations are made where it makes sense
@@ -22,43 +22,37 @@ class ExlaClient;
 
 class ExlaBuffer {
  public:
-  ExlaBuffer(std::unique_ptr<xla::PjRtBuffer> buffer,
-             bool erlang_managed = true);
+  ExlaBuffer(std::unique_ptr<xla::PjRtBuffer> buffer);
 
+  int device_id() { return buffer_->device()->id(); }
   xla::PjRtBuffer* buffer() { return buffer_.get(); }
   xla::StatusOr<ExlaBuffer*> CopyToDevice(xla::PjRtDevice * dst_device);
   xla::StatusOr<ERL_NIF_TERM> ToBinary(ErlNifEnv* env, exla::int64 size);
   xla::Status Deallocate();
 
   ~ExlaBuffer() {
-    // If the Erlang VM wants to GC, block it until the host uses it.
-    // TODO: We likely want to keep the buffer as a shared pointer
-    // between Erlang VM and XLA and use AcquireExternalReference
-    // to notify that the buffer should be kept around until the
-    // reference is released.
-    // https://github.com/tensorflow/tensorflow/blob/b8eb820d6cb27cfa8ab65c40ce9a161de314533c/tensorflow/compiler/xla/pjrt/pjrt_client.h#L763-L780
-    if(erlang_managed_) (void)buffer_->BlockHostUntilReady();
+    // Theoretically this may block if a computation is running
+    // but we always block the host until the computation is done.
   }
 
  private:
   std::unique_ptr<xla::PjRtBuffer> buffer_;
-  bool erlang_managed_;
 };
 
 class ExlaExecutable {
  public:
-  ExlaExecutable(std::unique_ptr<xla::PjRtExecutable> executable,
+  ExlaExecutable(std::unique_ptr<xla::PjRtLoadedExecutable> executable,
                  absl::optional<std::string> fingerprint,
                  ExlaClient* client);
 
-  xla::PjRtExecutable* executable() { return executable_.get(); }
+  xla::PjRtLoadedExecutable* executable() { return executable_.get(); }
 
   xla::StatusOr<ERL_NIF_TERM> Run(ErlNifEnv* env,
                                   ERL_NIF_TERM arguments,
                                   int device_id);
 
  private:
-  std::unique_ptr<xla::PjRtExecutable> executable_;
+  std::unique_ptr<xla::PjRtLoadedExecutable> executable_;
   absl::optional<std::string> fingerprint_;
   ExlaClient* client_;
 };
@@ -80,8 +74,7 @@ class ExlaClient {
   xla::StatusOr<ExlaBuffer*> BufferFromBinary(ErlNifEnv* env,
                                               ERL_NIF_TERM binary_term,
                                               xla::Shape& shape,
-                                              int device_id,
-                                              bool can_be_released_after_run);
+                                              int device_id);
 
   // TODO(seanmor5): This is device logic and should be refactored
   xla::Status TransferToInfeed(ErlNifEnv* env,

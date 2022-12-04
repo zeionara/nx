@@ -294,6 +294,21 @@ defmodule Nx do
         ]
       >
 
+  You can also use `..` as the full-slice range, which means you want to
+  keep a given dimension as is:
+
+      iex> t = Nx.tensor([[1, 2], [3, 4], [5, 6], [7, 8]])
+      iex> t[[.., 1..-1//1]] # Drop only the first "column"
+      #Nx.Tensor<
+        s64[4][1]
+        [
+          [2],
+          [4],
+          [6],
+          [8]
+        ]
+      >
+
   You can mix both ranges and integers in the list too:
 
       iex> t = Nx.tensor([[1, 2, 3], [4, 5, 6], [7, 8, 9], [10, 11, 12]])
@@ -360,11 +375,20 @@ defmodule Nx do
 
       # config/runtime.exs
       import Config
-      config :nx, default_backend: Lib.CustomBackend
+      config :nx, default_backend: EXLA.Backend
 
-  Or by calling `Nx.default_backend/1`:
+  In your notebooks and on `Mix.install/2`, you might:
 
-      Nx.default_backend({Lib.CustomBackend, device: :cuda})
+      Mix.install(
+        [
+          {:nx, ">= 0.0.0"}
+        ],
+        config: [nx: [default_backend: {EXLA.Backend, device: :cuda}]]
+      )
+
+  Or by calling `Nx.global_default_backend/1` (less preferrable):
+
+      Nx.global_default_backend({EXLA.Backend, device: :cuda})
 
   To implement your own backend, check the `Nx.Tensor` behaviour.
   """
@@ -410,7 +434,7 @@ defmodule Nx do
   The argument is either a number, which means the tensor is a scalar
   (zero-dimensions), a list of those (the tensor is a vector) or
   a list of n-lists of those, leading to n-dimensional tensors.
-  The tensor will be allocated in `Nx.default_backend/1`, unless the
+  The tensor will be allocated in `Nx.default_backend/0`, unless the
   `:backend` option is given, which overrides the default one.
 
   ## Examples
@@ -3143,7 +3167,7 @@ defmodule Nx do
   def compatible?(%T{} = left, %T{} = right) do
     %{type: type, shape: shape, names: left_names} = left
 
-    case to_tensor(right) do
+    case right do
       %{type: ^type, shape: ^shape, names: right_names} ->
         compatible_names?(left_names, right_names)
 
@@ -3360,23 +3384,36 @@ defmodule Nx do
   @backend_key {Nx, :default_backend}
 
   @doc """
-  Sets the current process default backend to `backend` with the given `opts`.
+  Sets the given `backend` as default in the **current process**.
 
   The default backend is stored only in the process dictionary.
   This means if you start a separate process, such as `Task`,
   the default backend must be set on the new process too.
 
-  This function is mostly used for scripting and testing. In your
-  applications, you typically set the backend in your config files:
+  This function is mostly used for scripting and testing.
+  In your applications, you must prefer to set the backend
+  in your config files:
 
-      config :nx, :default_backend, {Lib.CustomBackend, device: :cuda}
+      config :nx, :default_backend, {EXLA.Backend, device: :cuda}
+
+  In your notebooks and on `Mix.install/2`, you might:
+
+      Mix.install(
+        [
+          {:nx, ">= 0.0.0"}
+        ],
+        config: [nx: [default_backend: {EXLA.Backend, device: :cuda}]]
+      )
+
+  Or use `Nx.global_default_backend/1` as it changes the
+  default backend on all processes.
 
   ## Examples
 
-      iex> Nx.default_backend({Lib.CustomBackend, device: :cuda})
+      iex> Nx.default_backend({EXLA.Backend, device: :cuda})
       {Nx.BinaryBackend, []}
       iex> Nx.default_backend()
-      {Lib.CustomBackend, device: :cuda}
+      {EXLA.Backend, device: :cuda}
 
   """
   @doc type: :backend
@@ -3390,10 +3427,21 @@ defmodule Nx do
 
   You must avoid calling this function at runtime. It is mostly
   useful during scripts or code notebooks to set a default.
-  If you need to configure a global default backend in your
-  applications, you can do so in your `config/*.exs` files:
 
-      config :nx, :default_backend, {Lib.CustomBackend, []}
+  If you need to configure a global default backend in your
+  applications, it is generally preferred to do so in your
+  `config/*.exs` files:
+
+      config :nx, :default_backend, {EXLA.Backend, []}
+
+  In your notebooks and on `Mix.install/2`, you might:
+
+      Mix.install(
+        [
+          {:nx, ">= 0.0.0"}
+        ],
+        config: [nx: [default_backend: {EXLA.Backend, device: :cuda}]]
+      )
 
   """
   @doc type: :backend
@@ -5994,8 +6042,10 @@ defmodule Nx do
       Nx.Shared.raise_complex_not_supported("complex", 2)
     end
 
+    t = type(real) |> Nx.Type.merge(type(imag)) |> Nx.Type.to_complex()
+
     imag
-    |> multiply(Nx.Constants.i())
+    |> multiply(Nx.Constants.i(type: t))
     |> add(real)
   end
 
@@ -10217,12 +10267,16 @@ defmodule Nx do
     strides = Keyword.fetch!(opts, :strides)
     %T{shape: shape, names: names} = tensor = to_tensor(tensor)
     axis = Nx.Shape.normalize_axis(shape, axis, names)
-    rank = rank(shape)
 
-    start_indices = List.duplicate(0, rank) |> List.replace_at(axis, start_index)
-    lengths = shape |> put_elem(axis, len) |> Tuple.to_list()
-    strides = List.duplicate(1, rank) |> List.replace_at(axis, strides)
-    slice(tensor, start_indices, lengths, strides: strides)
+    if start_index == 0 and strides == 1 and elem(shape, axis) == len do
+      tensor
+    else
+      rank = rank(shape)
+      start_indices = List.duplicate(0, rank) |> List.replace_at(axis, start_index)
+      lengths = shape |> put_elem(axis, len) |> Tuple.to_list()
+      strides = List.duplicate(1, rank) |> List.replace_at(axis, strides)
+      slice(tensor, start_indices, lengths, strides: strides)
+    end
   end
 
   @doc false
